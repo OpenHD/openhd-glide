@@ -8,6 +8,7 @@ required_vars=(
   GLIDE_PACKAGE_ARCH
   GLIDE_CLOUDSMITH_DISTRO
   GLIDE_RELEASE
+  GLIDE_RADXA_REPO_SUITE
   GLIDE_REQUIRE_RKMPP
   GLIDE_EXTRA_DEBIAN_DEPENDS
   GITHUB_RUN_NUMBER
@@ -27,6 +28,7 @@ echo "standard" > /opt/OpenHD-ChrootCompiler/additionalFiles/custom.txt
 echo "${GLIDE_PACKAGE_ARCH}" > /opt/OpenHD-ChrootCompiler/additionalFiles/arch.txt
 echo "${GLIDE_CLOUDSMITH_DISTRO}" > /opt/OpenHD-ChrootCompiler/additionalFiles/distro.txt
 echo "${GLIDE_RELEASE}" > /opt/OpenHD-ChrootCompiler/additionalFiles/flavor.txt
+echo "${GLIDE_RADXA_REPO_SUITE}" > /opt/OpenHD-ChrootCompiler/additionalFiles/radxa_repo_suite.txt
 echo "${GITHUB_REF_NAME:-}" > /opt/OpenHD-ChrootCompiler/additionalFiles/repo.txt
 cp "${GITHUB_WORKSPACE}/scripts/ci-build-chroot-package.sh" /opt/OpenHD-ChrootCompiler/additionalFiles/build_chroot.sh
 chmod +x /opt/OpenHD-ChrootCompiler/additionalFiles/build_chroot.sh

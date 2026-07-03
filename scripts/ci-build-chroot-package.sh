@@ -16,6 +16,7 @@ if [ -d /etc/apt/sources.list.d ]; then
 fi
 
 target_release="$(cat flavor.txt 2>/dev/null || true)"
+radxa_repo_suite="$(cat radxa_repo_suite.txt 2>/dev/null || printf '%s' "${target_release}")"
 install_openhd_cloudsmith_key() {
   mkdir -p /etc/apt/trusted.gpg.d /usr/share/keyrings
   key_tmp="$(mktemp)"
@@ -69,29 +70,29 @@ if [ "${target_release}" = "bookworm" ]; then
   for source_file in /etc/apt/sources.list /etc/apt/sources.list.d/*.list; do
     if [ -f "${source_file}" ] && grep -q 'radxa-repo.github.io/bullseye' "${source_file}"; then
       sudo sed -i -E \
-        -e 's|https://radxa-repo.github.io/bullseye/?|https://radxa-repo.github.io/bookworm/|g' \
-        -e 's|http://radxa-repo.github.io/bullseye/?|https://radxa-repo.github.io/bookworm/|g' \
-        -e 's|rockchip-bullseye|rockchip-bookworm|g' \
-        -e 's| bullseye | bookworm |g' \
+        -e "s|https://radxa-repo.github.io/bullseye/?|https://radxa-repo.github.io/${radxa_repo_suite}/|g" \
+        -e "s|http://radxa-repo.github.io/bullseye/?|https://radxa-repo.github.io/${radxa_repo_suite}/|g" \
+        -e "s|rockchip-bullseye|${radxa_repo_suite}|g" \
+        -e "s| bullseye | ${radxa_repo_suite} |g" \
         "${source_file}"
     fi
-    if [ -f "${source_file}" ] && grep -q 'radxa-repo.github.io/bookworm' "${source_file}"; then
+    if [ -f "${source_file}" ] && grep -q 'radxa-repo.github.io/.*bookworm' "${source_file}"; then
       sudo sed -i -E \
         -e 's|\[signed-by=[^]]+\]|[signed-by=/usr/share/keyrings/radxa-archive-keyring.gpg]|g' \
-        -e '\|radxa-repo.github.io/bookworm|{ /\[signed-by=/! s|^deb |deb [signed-by=/usr/share/keyrings/radxa-archive-keyring.gpg] | }' \
+        -e '\|radxa-repo.github.io/.*bookworm|{ /\[signed-by=/! s|^deb |deb [signed-by=/usr/share/keyrings/radxa-archive-keyring.gpg] | }' \
         "${source_file}"
     fi
   done
   for source_file in /etc/apt/sources.list.d/*.sources; do
     if [ -f "${source_file}" ] && grep -q 'radxa-repo.github.io/bullseye' "${source_file}"; then
       sudo sed -i -E \
-        -e 's|https://radxa-repo.github.io/bullseye/?|https://radxa-repo.github.io/bookworm/|g' \
-        -e 's|http://radxa-repo.github.io/bullseye/?|https://radxa-repo.github.io/bookworm/|g' \
-        -e 's|rockchip-bullseye|rockchip-bookworm|g' \
-        -e 's|Suites: bullseye|Suites: bookworm|g' \
+        -e "s|https://radxa-repo.github.io/bullseye/?|https://radxa-repo.github.io/${radxa_repo_suite}/|g" \
+        -e "s|http://radxa-repo.github.io/bullseye/?|https://radxa-repo.github.io/${radxa_repo_suite}/|g" \
+        -e "s|rockchip-bullseye|${radxa_repo_suite}|g" \
+        -e "s|Suites: bullseye|Suites: ${radxa_repo_suite}|g" \
         "${source_file}"
     fi
-    if [ -f "${source_file}" ] && grep -q 'radxa-repo.github.io/bookworm' "${source_file}"; then
+    if [ -f "${source_file}" ] && grep -q 'radxa-repo.github.io/.*bookworm' "${source_file}"; then
       sudo sed -i -E \
         -e 's|^Signed-By:.*$|Signed-By: /usr/share/keyrings/radxa-archive-keyring.gpg|g' \
         "${source_file}"
@@ -100,8 +101,8 @@ if [ "${target_release}" = "bookworm" ]; then
       fi
     fi
   done
-  sudo tee /etc/apt/sources.list.d/70-bookworm.list >/dev/null <<'APT_SOURCES'
-deb [signed-by=/usr/share/keyrings/radxa-archive-keyring.gpg] https://radxa-repo.github.io/bookworm/ bookworm main
+  sudo tee /etc/apt/sources.list.d/70-radxa-${radxa_repo_suite}.list >/dev/null <<APT_SOURCES
+deb [signed-by=/usr/share/keyrings/radxa-archive-keyring.gpg] https://radxa-repo.github.io/${radxa_repo_suite}/ ${radxa_repo_suite} main
 APT_SOURCES
 elif [ "${target_release}" = "bullseye" ]; then
   for source_file in /etc/apt/sources.list /etc/apt/sources.list.d/*.list; do

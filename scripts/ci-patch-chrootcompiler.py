@@ -62,17 +62,18 @@ openhd_glide_normalize_apt_sources() {
 
   if [[ "${DISTRO}" == "bookworm" ]]; then
     echo "[apt-preflight] Ensuring Bookworm apt sources..."
+    radxa_repo_suite="$(cat /opt/additionalFiles/radxa_repo_suite.txt 2>/dev/null || printf 'bookworm')"
     while IFS= read -r -d '' source_file; do
       if grep -q 'radxa-repo.github.io/bullseye' "${source_file}"; then
         sudo sed -i -E \
-          -e 's|https://radxa-repo.github.io/bullseye/?|https://radxa-repo.github.io/bookworm/|g' \
-          -e 's|http://radxa-repo.github.io/bullseye/?|https://radxa-repo.github.io/bookworm/|g' \
-          -e 's|rockchip-bullseye|rockchip-bookworm|g' \
-          -e 's| bullseye | bookworm |g' \
-          -e 's|Suites: bullseye|Suites: bookworm|g' \
+          -e "s|https://radxa-repo.github.io/bullseye/?|https://radxa-repo.github.io/${radxa_repo_suite}/|g" \
+          -e "s|http://radxa-repo.github.io/bullseye/?|https://radxa-repo.github.io/${radxa_repo_suite}/|g" \
+          -e "s|rockchip-bullseye|${radxa_repo_suite}|g" \
+          -e "s| bullseye | ${radxa_repo_suite} |g" \
+          -e "s|Suites: bullseye|Suites: ${radxa_repo_suite}|g" \
           "${source_file}"
       fi
-      if grep -q 'radxa-repo.github.io/bookworm' "${source_file}"; then
+      if grep -q 'radxa-repo.github.io/.*bookworm' "${source_file}"; then
         case "${source_file}" in
           *.sources)
             sudo sed -i -E \
@@ -82,7 +83,7 @@ openhd_glide_normalize_apt_sources() {
           *)
             sudo sed -i -E \
               -e 's|\[signed-by=[^]]+\]|[signed-by=/usr/share/keyrings/radxa-archive-keyring.gpg]|g' \
-              -e '\|radxa-repo.github.io/bookworm|{ /\[signed-by=/! s|^deb |deb [signed-by=/usr/share/keyrings/radxa-archive-keyring.gpg] | }' \
+              -e '\|radxa-repo.github.io/.*bookworm|{ /\[signed-by=/! s|^deb |deb [signed-by=/usr/share/keyrings/radxa-archive-keyring.gpg] | }' \
               "${source_file}"
             ;;
         esac
@@ -91,8 +92,8 @@ openhd_glide_normalize_apt_sources() {
         fi
       fi
     done < <(find /etc/apt -type f \( -name 'sources.list' -o -name '*.list' -o -name '*.sources' \) -print0 2>/dev/null)
-    sudo tee /etc/apt/sources.list.d/70-bookworm.list >/dev/null <<'APT_SOURCES'
-deb [signed-by=/usr/share/keyrings/radxa-archive-keyring.gpg] https://radxa-repo.github.io/bookworm/ bookworm main
+    sudo tee "/etc/apt/sources.list.d/70-radxa-${radxa_repo_suite}.list" >/dev/null <<APT_SOURCES
+deb [signed-by=/usr/share/keyrings/radxa-archive-keyring.gpg] https://radxa-repo.github.io/${radxa_repo_suite}/ ${radxa_repo_suite} main
 APT_SOURCES
     sudo tee /etc/apt/sources.list.d/openhd-bookworm.list >/dev/null <<'APT_SOURCES'
 deb http://deb.debian.org/debian bookworm main contrib non-free non-free-firmware
