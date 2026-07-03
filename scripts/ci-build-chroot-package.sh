@@ -39,7 +39,33 @@ install_openhd_cloudsmith_key() {
   chmod 644 /etc/apt/trusted.gpg.d/openhd-release.* 2>/dev/null || true
 }
 
-if [ "${target_release}" = "bullseye" ]; then
+install_radxa_archive_keyring() {
+  mkdir -p /etc/apt/trusted.gpg.d /usr/share/keyrings
+  keyring_tmp="$(mktemp)"
+  version_tmp="$(mktemp)"
+  if command -v curl >/dev/null 2>&1; then
+    curl -1fsSL "https://github.com/radxa-pkg/radxa-archive-keyring/releases/latest/download/VERSION" -o "${version_tmp}"
+    version="$(cat "${version_tmp}")"
+    curl -1fsSL "https://github.com/radxa-pkg/radxa-archive-keyring/releases/latest/download/radxa-archive-keyring_${version}_all.deb" -o "${keyring_tmp}"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO "${version_tmp}" "https://github.com/radxa-pkg/radxa-archive-keyring/releases/latest/download/VERSION"
+    version="$(cat "${version_tmp}")"
+    wget -qO "${keyring_tmp}" "https://github.com/radxa-pkg/radxa-archive-keyring/releases/latest/download/radxa-archive-keyring_${version}_all.deb"
+  else
+    echo "curl or wget is required to install the Radxa archive keyring" >&2
+    return 1
+  fi
+  dpkg -i "${keyring_tmp}"
+  if [ -f /usr/share/keyrings/radxa-archive-keyring.gpg ]; then
+    cp /usr/share/keyrings/radxa-archive-keyring.gpg /etc/apt/trusted.gpg.d/radxa-archive-keyring.gpg
+    chmod 644 /etc/apt/trusted.gpg.d/radxa-archive-keyring.gpg
+  fi
+  rm -f "${keyring_tmp}" "${version_tmp}"
+}
+
+if [ "${target_release}" = "bookworm" ]; then
+  install_radxa_archive_keyring
+elif [ "${target_release}" = "bullseye" ]; then
   for source_file in /etc/apt/sources.list /etc/apt/sources.list.d/*.list; do
     [ -f "${source_file}" ] && sudo sed -i '\|bullseye-backports|d' "${source_file}"
   done

@@ -34,8 +34,33 @@ openhd_glide_normalize_apt_sources() {
     sudo chmod 644 /etc/apt/trusted.gpg.d/openhd-release.* 2>/dev/null || true
   }
 
+  install_radxa_archive_keyring() {
+    sudo mkdir -p /etc/apt/trusted.gpg.d /usr/share/keyrings
+    keyring_tmp="$(mktemp)"
+    version_tmp="$(mktemp)"
+    if command -v curl >/dev/null 2>&1; then
+      curl -1fsSL "https://github.com/radxa-pkg/radxa-archive-keyring/releases/latest/download/VERSION" -o "${version_tmp}"
+      version="$(cat "${version_tmp}")"
+      curl -1fsSL "https://github.com/radxa-pkg/radxa-archive-keyring/releases/latest/download/radxa-archive-keyring_${version}_all.deb" -o "${keyring_tmp}"
+    elif command -v wget >/dev/null 2>&1; then
+      wget -qO "${version_tmp}" "https://github.com/radxa-pkg/radxa-archive-keyring/releases/latest/download/VERSION"
+      version="$(cat "${version_tmp}")"
+      wget -qO "${keyring_tmp}" "https://github.com/radxa-pkg/radxa-archive-keyring/releases/latest/download/radxa-archive-keyring_${version}_all.deb"
+    else
+      echo "curl or wget is required to install the Radxa archive keyring" >&2
+      return 1
+    fi
+    sudo dpkg -i "${keyring_tmp}"
+    if [ -f /usr/share/keyrings/radxa-archive-keyring.gpg ]; then
+      sudo cp /usr/share/keyrings/radxa-archive-keyring.gpg /etc/apt/trusted.gpg.d/radxa-archive-keyring.gpg
+      sudo chmod 644 /etc/apt/trusted.gpg.d/radxa-archive-keyring.gpg
+    fi
+    rm -f "${keyring_tmp}" "${version_tmp}"
+  }
+
   if [[ "${DISTRO}" == "bookworm" ]]; then
     echo "[apt-preflight] Ensuring Bookworm apt sources..."
+    install_radxa_archive_keyring
     sudo tee /etc/apt/sources.list.d/openhd-bookworm.list >/dev/null <<'APT_SOURCES'
 deb http://deb.debian.org/debian bookworm main contrib non-free non-free-firmware
 deb http://deb.debian.org/debian bookworm-updates main contrib non-free non-free-firmware
