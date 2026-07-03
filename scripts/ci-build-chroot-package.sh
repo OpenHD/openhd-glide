@@ -56,16 +56,16 @@ install_radxa_archive_keyring() {
     return 1
   fi
   dpkg -i "${keyring_tmp}"
-  if [ -f /usr/share/keyrings/radxa-archive-keyring.gpg ]; then
-    cp /usr/share/keyrings/radxa-archive-keyring.gpg /etc/apt/trusted.gpg.d/radxa-archive-keyring.gpg
-    chmod 644 /etc/apt/trusted.gpg.d/radxa-archive-keyring.gpg
-  fi
+  for keyring in /usr/share/keyrings/radxa-archive-keyring*.gpg; do
+    [ -f "${keyring}" ] && cp "${keyring}" "/etc/apt/trusted.gpg.d/$(basename "${keyring}")"
+  done
+  chmod 644 /etc/apt/trusted.gpg.d/radxa-archive-keyring*.gpg 2>/dev/null || true
   rm -f "${keyring_tmp}" "${version_tmp}"
 }
 
-if [ "${target_release}" = "bookworm" ]; then
-  install_radxa_archive_keyring
-elif [ "${target_release}" = "bullseye" ]; then
+install_radxa_archive_keyring
+
+if [ "${target_release}" = "bullseye" ]; then
   for source_file in /etc/apt/sources.list /etc/apt/sources.list.d/*.list; do
     [ -f "${source_file}" ] && sudo sed -i '\|bullseye-backports|d' "${source_file}"
   done

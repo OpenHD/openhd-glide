@@ -51,16 +51,17 @@ openhd_glide_normalize_apt_sources() {
       return 1
     fi
     sudo dpkg -i "${keyring_tmp}"
-    if [ -f /usr/share/keyrings/radxa-archive-keyring.gpg ]; then
-      sudo cp /usr/share/keyrings/radxa-archive-keyring.gpg /etc/apt/trusted.gpg.d/radxa-archive-keyring.gpg
-      sudo chmod 644 /etc/apt/trusted.gpg.d/radxa-archive-keyring.gpg
-    fi
+    for keyring in /usr/share/keyrings/radxa-archive-keyring*.gpg; do
+      [ -f "${keyring}" ] && sudo cp "${keyring}" "/etc/apt/trusted.gpg.d/$(basename "${keyring}")"
+    done
+    sudo chmod 644 /etc/apt/trusted.gpg.d/radxa-archive-keyring*.gpg 2>/dev/null || true
     rm -f "${keyring_tmp}" "${version_tmp}"
   }
 
+  install_radxa_archive_keyring
+
   if [[ "${DISTRO}" == "bookworm" ]]; then
     echo "[apt-preflight] Ensuring Bookworm apt sources..."
-    install_radxa_archive_keyring
     sudo tee /etc/apt/sources.list.d/openhd-bookworm.list >/dev/null <<'APT_SOURCES'
 deb http://deb.debian.org/debian bookworm main contrib non-free non-free-firmware
 deb http://deb.debian.org/debian bookworm-updates main contrib non-free non-free-firmware
