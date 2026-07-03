@@ -62,6 +62,22 @@ openhd_glide_normalize_apt_sources() {
 
   if [[ "${DISTRO}" == "bookworm" ]]; then
     echo "[apt-preflight] Ensuring Bookworm apt sources..."
+    while IFS= read -r -d '' source_file; do
+      if grep -q 'radxa-repo.github.io/bullseye' "${source_file}"; then
+        sudo sed -i -E \
+          -e 's|https://radxa-repo.github.io/bullseye/?|https://radxa-repo.github.io/bookworm/|g' \
+          -e 's|http://radxa-repo.github.io/bullseye/?|https://radxa-repo.github.io/bookworm/|g' \
+          -e 's|rockchip-bullseye|rockchip-bookworm|g' \
+          -e 's| bullseye | bookworm |g' \
+          -e 's|Suites: bullseye|Suites: bookworm|g' \
+          "${source_file}"
+      fi
+    done < <(find /etc/apt -type f \( -name 'sources.list' -o -name '*.list' -o -name '*.sources' \) -print0 2>/dev/null)
+    if ! grep -Rqs 'radxa-repo.github.io/bookworm' /etc/apt/sources.list /etc/apt/sources.list.d; then
+      sudo tee /etc/apt/sources.list.d/radxa-bookworm.list >/dev/null <<'APT_SOURCES'
+deb [signed-by=/usr/share/keyrings/radxa-archive-keyring.gpg] https://radxa-repo.github.io/bookworm/ bookworm main
+APT_SOURCES
+    fi
     sudo tee /etc/apt/sources.list.d/openhd-bookworm.list >/dev/null <<'APT_SOURCES'
 deb http://deb.debian.org/debian bookworm main contrib non-free non-free-firmware
 deb http://deb.debian.org/debian bookworm-updates main contrib non-free non-free-firmware

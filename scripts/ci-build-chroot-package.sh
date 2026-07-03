@@ -65,7 +65,33 @@ install_radxa_archive_keyring() {
 
 install_radxa_archive_keyring
 
-if [ "${target_release}" = "bullseye" ]; then
+if [ "${target_release}" = "bookworm" ]; then
+  for source_file in /etc/apt/sources.list /etc/apt/sources.list.d/*.list; do
+    if [ -f "${source_file}" ] && grep -q 'radxa-repo.github.io/bullseye' "${source_file}"; then
+      sudo sed -i -E \
+        -e 's|https://radxa-repo.github.io/bullseye/?|https://radxa-repo.github.io/bookworm/|g' \
+        -e 's|http://radxa-repo.github.io/bullseye/?|https://radxa-repo.github.io/bookworm/|g' \
+        -e 's|rockchip-bullseye|rockchip-bookworm|g' \
+        -e 's| bullseye | bookworm |g' \
+        "${source_file}"
+    fi
+  done
+  for source_file in /etc/apt/sources.list.d/*.sources; do
+    if [ -f "${source_file}" ] && grep -q 'radxa-repo.github.io/bullseye' "${source_file}"; then
+      sudo sed -i -E \
+        -e 's|https://radxa-repo.github.io/bullseye/?|https://radxa-repo.github.io/bookworm/|g' \
+        -e 's|http://radxa-repo.github.io/bullseye/?|https://radxa-repo.github.io/bookworm/|g' \
+        -e 's|rockchip-bullseye|rockchip-bookworm|g' \
+        -e 's|Suites: bullseye|Suites: bookworm|g' \
+        "${source_file}"
+    fi
+  done
+  if ! grep -Rqs 'radxa-repo.github.io/bookworm' /etc/apt/sources.list /etc/apt/sources.list.d; then
+    sudo tee /etc/apt/sources.list.d/radxa-bookworm.list >/dev/null <<'APT_SOURCES'
+deb [signed-by=/usr/share/keyrings/radxa-archive-keyring.gpg] https://radxa-repo.github.io/bookworm/ bookworm main
+APT_SOURCES
+  fi
+elif [ "${target_release}" = "bullseye" ]; then
   for source_file in /etc/apt/sources.list /etc/apt/sources.list.d/*.list; do
     [ -f "${source_file}" ] && sudo sed -i '\|bullseye-backports|d' "${source_file}"
   done
