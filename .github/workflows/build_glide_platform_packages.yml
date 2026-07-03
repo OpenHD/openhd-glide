@@ -129,6 +129,28 @@ jobs:
             sudo sed -i 's/^#deb /deb /' /etc/apt/sources.list.d/*.list 2>/dev/null || true
           fi
           target_release="$(cat flavor.txt 2>/dev/null || true)"
+          install_openhd_cloudsmith_key() {
+            mkdir -p /etc/apt/trusted.gpg.d /usr/share/keyrings
+            key_tmp="$(mktemp)"
+            if command -v curl >/dev/null 2>&1; then
+              curl -1fsSL "https://dl.cloudsmith.io/public/openhd/release/gpg.8F544FDF656561E4.key" -o "${key_tmp}"
+            elif command -v wget >/dev/null 2>&1; then
+              wget -qO "${key_tmp}" "https://dl.cloudsmith.io/public/openhd/release/gpg.8F544FDF656561E4.key"
+            else
+              echo "curl or wget is required to import the OpenHD Cloudsmith key" >&2
+              return 1
+            fi
+            if command -v gpg >/dev/null 2>&1; then
+              gpg --dearmor <"${key_tmp}" >/usr/share/keyrings/openhd-release-archive-keyring.gpg
+              cp /usr/share/keyrings/openhd-release-archive-keyring.gpg /etc/apt/trusted.gpg.d/openhd-release.gpg
+            else
+              cp "${key_tmp}" /usr/share/keyrings/openhd-release-archive-keyring.asc
+              cp "${key_tmp}" /etc/apt/trusted.gpg.d/openhd-release.asc
+            fi
+            rm -f "${key_tmp}"
+            chmod 644 /usr/share/keyrings/openhd-release-archive-keyring.* 2>/dev/null || true
+            chmod 644 /etc/apt/trusted.gpg.d/openhd-release.* 2>/dev/null || true
+          }
           if [ "${target_release}" = "bookworm" ]; then
             for source_file in /etc/apt/sources.list /etc/apt/sources.list.d/*.list; do
               [ -f "${source_file}" ] && sudo sed -i '\|radxa-repo.github.io/bullseye|d' "${source_file}"
@@ -136,6 +158,14 @@ jobs:
             for source_file in /etc/apt/sources.list.d/*.sources; do
               [ -f "${source_file}" ] && grep -q 'radxa-repo.github.io/bullseye' "${source_file}" && sudo rm -f "${source_file}"
             done
+          elif [ "${target_release}" = "bullseye" ]; then
+            for source_file in /etc/apt/sources.list /etc/apt/sources.list.d/*.list; do
+              [ -f "${source_file}" ] && sudo sed -i '\|bullseye-backports|d' "${source_file}"
+            done
+            for source_file in /etc/apt/sources.list.d/*.sources; do
+              [ -f "${source_file}" ] && grep -q 'bullseye-backports' "${source_file}" && sudo rm -f "${source_file}"
+            done
+            install_openhd_cloudsmith_key
           fi
 
           apt-get update --fix-missing
@@ -301,22 +331,56 @@ jobs:
               packages_needle
               + "\n"
               + f"{packages_marker}() {{\n"
-              + "  if [[ \"${DISTRO}\" != \"bookworm\" ]]; then\n"
-              + "    return 0\n"
-              + "  fi\n"
-              + "  echo \"[apt-preflight] Normalizing Bookworm apt sources...\"\n"
-              + "  sudo rm -f /etc/apt/sources.list /etc/apt/sources.list.d/openhd-bookworm.sources /etc/apt/sources.list.d/openhd-bookworm.list\n"
-              + "  while IFS= read -r -d '' source_file; do\n"
-              + "    if grep -Eq 'archive\\.debian\\.org|deb\\.debian\\.org/debian|security\\.debian\\.org/debian-security|download\\.vscodium\\.com|radxa-repo\\.github\\.io/bullseye' \"${source_file}\"; then\n"
-              + "      sudo rm -f \"${source_file}\"\n"
+              + "  install_openhd_cloudsmith_key() {\n"
+              + "    sudo mkdir -p /etc/apt/trusted.gpg.d /usr/share/keyrings\n"
+              + "    key_tmp=\"$(mktemp)\"\n"
+              + "    if command -v curl >/dev/null 2>&1; then\n"
+              + "      curl -1fsSL \"https://dl.cloudsmith.io/public/openhd/release/gpg.8F544FDF656561E4.key\" -o \"${key_tmp}\"\n"
+              + "    elif command -v wget >/dev/null 2>&1; then\n"
+              + "      wget -qO \"${key_tmp}\" \"https://dl.cloudsmith.io/public/openhd/release/gpg.8F544FDF656561E4.key\"\n"
+              + "    else\n"
+              + "      echo \"curl or wget is required to import the OpenHD Cloudsmith key\" >&2\n"
+              + "      return 1\n"
               + "    fi\n"
-              + "  done < <(find /etc/apt/sources.list.d -type f \\( -name '*.list' -o -name '*.sources' \\) -print0 2>/dev/null)\n"
-              + "  sudo tee /etc/apt/sources.list.d/openhd-bookworm.list >/dev/null <<'APT_SOURCES'\n"
+              + "    if command -v gpg >/dev/null 2>&1; then\n"
+              + "      gpg --dearmor <\"${key_tmp}\" | sudo tee /usr/share/keyrings/openhd-release-archive-keyring.gpg >/dev/null\n"
+              + "      sudo cp /usr/share/keyrings/openhd-release-archive-keyring.gpg /etc/apt/trusted.gpg.d/openhd-release.gpg\n"
+              + "    else\n"
+              + "      sudo cp \"${key_tmp}\" /usr/share/keyrings/openhd-release-archive-keyring.asc\n"
+              + "      sudo cp \"${key_tmp}\" /etc/apt/trusted.gpg.d/openhd-release.asc\n"
+              + "    fi\n"
+              + "    rm -f \"${key_tmp}\"\n"
+              + "    sudo chmod 644 /usr/share/keyrings/openhd-release-archive-keyring.* 2>/dev/null || true\n"
+              + "    sudo chmod 644 /etc/apt/trusted.gpg.d/openhd-release.* 2>/dev/null || true\n"
+              + "  }\n"
+              + "  if [[ \"${DISTRO}\" == \"bookworm\" ]]; then\n"
+              + "    echo \"[apt-preflight] Normalizing Bookworm apt sources...\"\n"
+              + "    sudo rm -f /etc/apt/sources.list /etc/apt/sources.list.d/openhd-bookworm.sources /etc/apt/sources.list.d/openhd-bookworm.list\n"
+              + "    while IFS= read -r -d '' source_file; do\n"
+              + "      if grep -Eq 'archive\\.debian\\.org|deb\\.debian\\.org/debian|security\\.debian\\.org/debian-security|download\\.vscodium\\.com|radxa-repo\\.github\\.io/bullseye' \"${source_file}\"; then\n"
+              + "        sudo rm -f \"${source_file}\"\n"
+              + "      fi\n"
+              + "    done < <(find /etc/apt/sources.list.d -type f \\( -name '*.list' -o -name '*.sources' \\) -print0 2>/dev/null)\n"
+              + "    sudo tee /etc/apt/sources.list.d/openhd-bookworm.list >/dev/null <<'APT_SOURCES'\n"
               + "deb http://deb.debian.org/debian bookworm main contrib non-free non-free-firmware\n"
               + "deb http://deb.debian.org/debian bookworm-updates main contrib non-free non-free-firmware\n"
               + "deb http://deb.debian.org/debian bookworm-backports main contrib non-free non-free-firmware\n"
               + "deb http://security.debian.org/debian-security bookworm-security main contrib non-free non-free-firmware\n"
               + "APT_SOURCES\n"
+              + "  elif [[ \"${DISTRO}\" == \"bullseye\" ]]; then\n"
+              + "    echo \"[apt-preflight] Normalizing Bullseye apt sources...\"\n"
+              + "    while IFS= read -r -d '' source_file; do\n"
+              + "      if grep -q 'bullseye-backports' \"${source_file}\"; then\n"
+              + "        case \"${source_file}\" in\n"
+              + "          *.sources) sudo rm -f \"${source_file}\" ;;\n"
+              + "          *) sudo sed -i '\\|bullseye-backports|d' \"${source_file}\" ;;\n"
+              + "        esac\n"
+              + "      fi\n"
+              + "    done < <(find /etc/apt -type f \\( -name 'sources.list' -o -name '*.list' -o -name '*.sources' \\) -print0 2>/dev/null)\n"
+              + "    install_openhd_cloudsmith_key\n"
+              + "  else\n"
+              + "    return 0\n"
+              + "  fi\n"
               + "  sudo tee /etc/apt/apt.conf.d/99openhd-ci-minimal-indexes >/dev/null <<'APT_CONF'\n"
               + "Acquire::Languages \"none\";\n"
               + "Acquire::IndexTargets::deb::DEP-11::DefaultEnabled \"false\";\n"
