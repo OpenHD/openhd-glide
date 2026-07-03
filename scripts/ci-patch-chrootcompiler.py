@@ -35,13 +35,7 @@ openhd_glide_normalize_apt_sources() {
   }
 
   if [[ "${DISTRO}" == "bookworm" ]]; then
-    echo "[apt-preflight] Normalizing Bookworm apt sources..."
-    sudo rm -f /etc/apt/sources.list /etc/apt/sources.list.d/openhd-bookworm.sources /etc/apt/sources.list.d/openhd-bookworm.list
-    while IFS= read -r -d '' source_file; do
-      if grep -Eq 'archive\.debian\.org|deb\.debian\.org/debian|security\.debian\.org/debian-security|download\.vscodium\.com|radxa-repo\.github\.io/bullseye' "${source_file}"; then
-        sudo rm -f "${source_file}"
-      fi
-    done < <(find /etc/apt/sources.list.d -type f \( -name '*.list' -o -name '*.sources' \) -print0 2>/dev/null)
+    echo "[apt-preflight] Ensuring Bookworm apt sources..."
     sudo tee /etc/apt/sources.list.d/openhd-bookworm.list >/dev/null <<'APT_SOURCES'
 deb http://deb.debian.org/debian bookworm main contrib non-free non-free-firmware
 deb http://deb.debian.org/debian bookworm-updates main contrib non-free non-free-firmware
@@ -98,20 +92,6 @@ openhd_glide_normalize_apt_sources
         if packages_needle not in packages_text:
             raise SystemExit("Could not find package-stage build marker in ChrootCompiler")
         packages_stage.write_text(packages_text.replace(packages_needle, packages_patch, 1))
-
-    packages_text = packages_stage.read_text()
-    rock5_bookworm_guard_marker = "# openhd_glide_bookworm_guard_rock5_preflight"
-    rock5_func_needle = "  normalize_bullseye_sources() {\n"
-    if rock5_bookworm_guard_marker not in packages_text and rock5_func_needle in packages_text:
-        rock5_func_patch = (
-            f"  {rock5_bookworm_guard_marker}\n"
-            + rock5_func_needle
-            + '    if [[ "${DISTRO}" == "bookworm" ]]; then\n'
-            + f"      {packages_marker}\n"
-            + "      return 0\n"
-            + "    fi\n"
-        )
-        packages_stage.write_text(packages_text.replace(rock5_func_needle, rock5_func_patch, 1))
 
     packages_text = packages_stage.read_text()
     apt_update_marker = "# openhd_glide_patch_apt_update_calls"

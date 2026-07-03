@@ -39,14 +39,7 @@ install_openhd_cloudsmith_key() {
   chmod 644 /etc/apt/trusted.gpg.d/openhd-release.* 2>/dev/null || true
 }
 
-if [ "${target_release}" = "bookworm" ]; then
-  for source_file in /etc/apt/sources.list /etc/apt/sources.list.d/*.list; do
-    [ -f "${source_file}" ] && sudo sed -i '\|radxa-repo.github.io/bullseye|d' "${source_file}"
-  done
-  for source_file in /etc/apt/sources.list.d/*.sources; do
-    [ -f "${source_file}" ] && grep -q 'radxa-repo.github.io/bullseye' "${source_file}" && sudo rm -f "${source_file}"
-  done
-elif [ "${target_release}" = "bullseye" ]; then
+if [ "${target_release}" = "bullseye" ]; then
   for source_file in /etc/apt/sources.list /etc/apt/sources.list.d/*.list; do
     [ -f "${source_file}" ] && sudo sed -i '\|bullseye-backports|d' "${source_file}"
   done
@@ -103,6 +96,13 @@ install_exact_runtime_for_dev_package() {
 install_exact_runtime_for_dev_package libgstreamer1.0-dev libgstreamer1.0-0
 install_exact_runtime_for_dev_package libgstreamer-plugins-base1.0-dev libgstreamer-plugins-base1.0-0
 
+apt_package_available() {
+  local package_name="$1"
+  local candidate
+  candidate="$(apt-cache policy "${package_name}" | awk '/Candidate:/ { print $2; exit }')"
+  [ -n "${candidate}" ] && [ "${candidate}" != "(none)" ]
+}
+
 apt-get install -y --no-install-recommends \
   build-essential \
   ca-certificates \
@@ -122,6 +122,12 @@ apt-get install -y --no-install-recommends \
 
 require_rkmpp="$(cat require_rkmpp.txt)"
 if [ "${require_rkmpp}" = "1" ]; then
+  for package_name in librockchip-mpp-dev librga-dev gstreamer1.0-rockchip1; do
+    if ! apt_package_available "${package_name}"; then
+      echo "[openhd-glide-ci] RKMPP is required, but ${package_name} is unavailable. Check that the Radxa repository is enabled." >&2
+      exit 1
+    fi
+  done
   apt-get install -y --no-install-recommends librockchip-mpp-dev librga-dev gstreamer1.0-rockchip1
 fi
 
@@ -137,13 +143,15 @@ if ! cmake_ge_320; then
   pip3 install --upgrade cmake || pip3 install --upgrade cmake --break-system-packages
 fi
 cmake --version
-rm -rf /usr/share/doc/* /usr/share/man/* /var/cache/man/* /var/lib/apt/lists/*
-apt-get clean
 
 package_suffix="$(cat package_suffix.txt)"
 package_version="$(cat package_version.txt)"
 package_arch="$(cat package_arch.txt)"
 extra_debian_depends="$(cat extra_debian_depends.txt)"
+
+rm -rf /usr/share/doc/* /usr/share/man/* /var/cache/man/* /var/lib/apt/lists/*
+apt-get clean
+
 build_dir="/mnt/openhd-glide-build/build-package-${package_suffix}"
 fetchcontent_dir="/mnt/openhd-glide-build/fetchcontent-${package_suffix}"
 mkdir -p /mnt/openhd-glide-build
