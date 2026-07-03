@@ -191,6 +191,7 @@ and runs `glide-ui` headless until the LVGL shared-buffer/plane backend exists.
 `glide-view` listens for UDP RTP video on port 5600 by default and decodes through GStreamer into `appsink`.
 It supports H.264, H.265, and MJPEG with `--udp-codec h264|h265|mjpeg`; H.264 remains the default for
 existing senders.
+For desktop and WSL debugging, add `--display` to present decoded frames through GStreamer's `autovideosink`.
 It intentionally does not use `kmssink`, because `kmssink` would compete for DRM/KMS master. The next production step is
 Unix-socket FD passing so `glide-view` can hand decoded DMABUFs to `openhd-glide`, while only `openhd-glide` imports
 buffers and programs KMS planes.
@@ -207,6 +208,12 @@ sudo ./build-kms/glide-view --udp-video --udp-port 5600
 
 This command does not display video. It should log `first decoded sample ...` and `decoded fps=...` once RTP/H.264
 frames arrive. If those lines do not appear, the sender is not reaching the receiver or the stream caps do not match.
+To show a desktop debug window instead, use:
+
+```sh
+./build-kms/glide-view --udp-video --udp-port 5600 --udp-codec mjpeg --display
+```
+
 On Rockchip RK3566/RK3568 images, the hardware path should use `mppvideodec`, and running under `sudo` may be required
 until the MPP/RGA/video device nodes have suitable permissions. On Allwinner BSP images, the hardware path may use
 `omxh264dec` instead of `v4l2h264dec`, and running under `sudo` is often required because the cedar and DMA heap device
@@ -268,6 +275,9 @@ examples/run-kms-video-cedar-video-only.sh 5600
 # Standalone glide-view decode-only test.
 examples/run-glide-view-decode-only.sh 5600 h264
 examples/run-glide-view-decode-only.sh 5600 mjpeg
+
+# WSL/desktop visible glide-view test.
+GLIDE_VIEW_DISPLAY=1 examples/run-wsl-video-decode.sh 5600 mjpeg
 
 # Multi-process KMS stack smoke test.
 examples/run-kms-stack.sh 5600 h264

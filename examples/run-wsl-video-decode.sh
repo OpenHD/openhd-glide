@@ -30,6 +30,12 @@ BUILD_DIR="${GLIDE_BUILD_DIR:-${ROOT_DIR}/build-wsl}"
 PORT="${1:-${GLIDE_VIEW_PORT:-5600}}"
 CODEC="${2:-${GLIDE_VIEW_CODEC:-${GLIDE_CODEC:-h264}}}"
 IPC_SOCKET="${GLIDE_IPC_SOCKET:-/tmp/openhd-glide-video-preview.sock}"
+DISPLAY_ARGS=()
+DISPLAY_LABEL="decode-only"
+if [ "${GLIDE_VIEW_DISPLAY:-0}" = "1" ]; then
+  DISPLAY_ARGS+=(--display)
+  DISPLAY_LABEL="display"
+fi
 
 CODEC="$(printf "%s" "$CODEC" | tr '[:upper:]' '[:lower:]')"
 case "$CODEC" in
@@ -72,11 +78,12 @@ if command -v ldd >/dev/null 2>&1; then
   fi
 fi
 
-echo "Starting WSL glide-view decode-only worker on UDP ${PORT} (${CODEC})." >&2
+echo "Starting WSL glide-view ${DISPLAY_LABEL} worker on UDP ${PORT} (${CODEC})." >&2
 echo "Use examples/stream-videotestsrc-to-glide-view.sh 127.0.0.1 ${PORT} from another shell to feed it." >&2
 
 exec "${BUILD_DIR}/glide-view" \
   --udp-video \
   --udp-port "${PORT}" \
   --udp-codec "${CODEC}" \
+  "${DISPLAY_ARGS[@]}" \
   --ipc-socket "${IPC_SOCKET}"

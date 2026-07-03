@@ -82,10 +82,22 @@ Run `glide-view` as a decode-only UDP worker:
 glide-view --udp-video --udp-port 5600 --udp-codec h264
 ```
 
+Add `--display` to show the decoded stream in a desktop/WSLg video window:
+
+```sh
+glide-view --udp-video --udp-port 5600 --udp-codec mjpeg --display
+```
+
 PowerShell form:
 
 ```powershell
 wsl -d Ubuntu-22.04 -- glide-view --udp-video --udp-port 5600 --udp-codec h264
+```
+
+PowerShell display form:
+
+```powershell
+wsl -d Ubuntu-22.04 -- glide-view --udp-video --udp-port 5600 --udp-codec mjpeg --display
 ```
 
 Feed it from another Ubuntu/WSL terminal with a test stream:
