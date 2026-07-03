@@ -1,0 +1,200 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+chmod 1777 /tmp || true
+export DEBIAN_FRONTEND=noninteractive
+mkdir -p /out/apt-archives/partial
+cat >/etc/apt/apt.conf.d/99openhd-ci-cache-dir <<'APT_CONF'
+Dir::Cache::archives "/out/apt-archives";
+APT::Install-Recommends "false";
+APT::Install-Suggests "false";
+APT_CONF
+apt-get clean
+
+if [ -d /etc/apt/sources.list.d ]; then
+  sudo sed -i 's/^#deb /deb /' /etc/apt/sources.list.d/*.list 2>/dev/null || true
+fi
+
+target_release="$(cat flavor.txt 2>/dev/null || true)"
+install_openhd_cloudsmith_key() {
+  mkdir -p /etc/apt/trusted.gpg.d /usr/share/keyrings
+  key_tmp="$(mktemp)"
+  if command -v curl >/dev/null 2>&1; then
+    curl -1fsSL "https://dl.cloudsmith.io/public/openhd/release/gpg.8F544FDF656561E4.key" -o "${key_tmp}"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO "${key_tmp}" "https://dl.cloudsmith.io/public/openhd/release/gpg.8F544FDF656561E4.key"
+  else
+    echo "curl or wget is required to import the OpenHD Cloudsmith key" >&2
+    return 1
+  fi
+  if command -v gpg >/dev/null 2>&1; then
+    gpg --dearmor <"${key_tmp}" >/usr/share/keyrings/openhd-release-archive-keyring.gpg
+    cp /usr/share/keyrings/openhd-release-archive-keyring.gpg /etc/apt/trusted.gpg.d/openhd-release.gpg
+  else
+    cp "${key_tmp}" /usr/share/keyrings/openhd-release-archive-keyring.asc
+    cp "${key_tmp}" /etc/apt/trusted.gpg.d/openhd-release.asc
+  fi
+  rm -f "${key_tmp}"
+  chmod 644 /usr/share/keyrings/openhd-release-archive-keyring.* 2>/dev/null || true
+  chmod 644 /etc/apt/trusted.gpg.d/openhd-release.* 2>/dev/null || true
+}
+
+if [ "${target_release}" = "bookworm" ]; then
+  for source_file in /etc/apt/sources.list /etc/apt/sources.list.d/*.list; do
+    [ -f "${source_file}" ] && sudo sed -i '\|radxa-repo.github.io/bullseye|d' "${source_file}"
+  done
+  for source_file in /etc/apt/sources.list.d/*.sources; do
+    [ -f "${source_file}" ] && grep -q 'radxa-repo.github.io/bullseye' "${source_file}" && sudo rm -f "${source_file}"
+  done
+elif [ "${target_release}" = "bullseye" ]; then
+  for source_file in /etc/apt/sources.list /etc/apt/sources.list.d/*.list; do
+    [ -f "${source_file}" ] && sudo sed -i '\|bullseye-backports|d' "${source_file}"
+  done
+  for source_file in /etc/apt/sources.list.d/*.sources; do
+    [ -f "${source_file}" ] && grep -q 'bullseye-backports' "${source_file}" && sudo rm -f "${source_file}"
+  done
+  install_openhd_cloudsmith_key
+fi
+
+apt-get update --fix-missing
+graphics_dev_packages=(
+  libdrm-dev
+  libgbm-dev
+  libgles2-mesa-dev
+  libegl1-mesa-dev
+)
+if apt-cache policy libdrm2 libgbm1 | awk '/Installed:|Candidate:/ && /~bpo/ { found = 1 } END { exit(found ? 0 : 1) }'; then
+  apt-get install -y --no-install-recommends -t bookworm-backports "${graphics_dev_packages[@]}"
+else
+  apt-get install -y --no-install-recommends "${graphics_dev_packages[@]}"
+fi
+
+apt-get remove -y gstreamer1.0-plugins-rtp || true
+
+install_exact_runtime_for_dev_package() {
+  local dev_package="$1"
+  local runtime_package="$2"
+  local dev_version
+  local runtime_version
+
+  dev_version="$(apt-cache policy "${dev_package}" | awk '/Candidate:/ { print $2; exit }')"
+  if [ -z "${dev_version}" ] || [ "${dev_version}" = "(none)" ]; then
+    return 0
+  fi
+
+  runtime_version="$(
+    apt-cache show "${dev_package}=${dev_version}" 2>/dev/null \
+      | awk -v runtime="${runtime_package}" '
+          $1 == "Depends:" {
+            for (i = 2; i <= NF; ++i) {
+              if ($i == runtime && $(i + 1) == "(=") {
+                gsub(/[),]/, "", $(i + 2))
+                print $(i + 2)
+                exit
+              }
+            }
+          }'
+  )"
+  if [ -n "${runtime_version}" ]; then
+    apt-get install -y --no-install-recommends --allow-downgrades "${runtime_package}=${runtime_version}"
+  fi
+}
+
+install_exact_runtime_for_dev_package libgstreamer1.0-dev libgstreamer1.0-0
+install_exact_runtime_for_dev_package libgstreamer-plugins-base1.0-dev libgstreamer-plugins-base1.0-0
+
+apt-get install -y --no-install-recommends \
+  build-essential \
+  ca-certificates \
+  git \
+  python3-pip \
+  pkg-config \
+  zlib1g-dev \
+  libfreetype-dev \
+  libgstreamer1.0-dev \
+  libgstreamer-plugins-base1.0-dev \
+  gstreamer1.0-tools \
+  gstreamer1.0-plugins-base \
+  gstreamer1.0-plugins-good \
+  gstreamer1.0-plugins-bad \
+  gstreamer1.0-plugins-ugly \
+  gstreamer1.0-libav
+
+require_rkmpp="$(cat require_rkmpp.txt)"
+if [ "${require_rkmpp}" = "1" ]; then
+  apt-get install -y --no-install-recommends librockchip-mpp-dev librga-dev gstreamer1.0-rockchip1
+fi
+
+apt-get install -y --no-install-recommends cmake || true
+cmake_ge_320() {
+  if ! command -v cmake >/dev/null 2>&1; then
+    return 1
+  fi
+  version="$(cmake --version | awk 'NR==1{print $3}')"
+  dpkg --compare-versions "$version" ge "3.20"
+}
+if ! cmake_ge_320; then
+  pip3 install --upgrade cmake || pip3 install --upgrade cmake --break-system-packages
+fi
+cmake --version
+rm -rf /usr/share/doc/* /usr/share/man/* /var/cache/man/* /var/lib/apt/lists/*
+apt-get clean
+
+package_suffix="$(cat package_suffix.txt)"
+package_version="$(cat package_version.txt)"
+package_arch="$(cat package_arch.txt)"
+extra_debian_depends="$(cat extra_debian_depends.txt)"
+build_dir="/mnt/openhd-glide-build/build-package-${package_suffix}"
+fetchcontent_dir="/mnt/openhd-glide-build/fetchcontent-${package_suffix}"
+mkdir -p /mnt/openhd-glide-build
+rm -rf "${build_dir}" "${fetchcontent_dir}"
+echo "[openhd-glide-ci] build filesystem:"
+df -h / /out /mnt/openhd-glide-build || true
+build_jobs="$(nproc)"
+if [ "${package_suffix}" = "radxa-cubie" ]; then
+  build_jobs=1
+fi
+
+cmake_args=(
+  -S .
+  -B "${build_dir}"
+  -DFETCHCONTENT_BASE_DIR="${fetchcontent_dir}"
+  -DCMAKE_BUILD_TYPE=Release
+  -DOPENHD_GLIDE_DEVICE_KMS=ON
+  -DOPENHD_GLIDE_REQUIRE_KMS_GBM=ON
+  -DOPENHD_GLIDE_REQUIRE_GSTREAMER=ON
+  -DOPENHD_GLIDE_PACKAGE_SUFFIX="-${package_suffix}"
+  -DOPENHD_GLIDE_PACKAGE_VERSION="${package_version}"
+  -DOPENHD_GLIDE_PACKAGE_ARCHITECTURE="${package_arch}"
+  -DOPENHD_GLIDE_EXTRA_DEBIAN_DEPENDS="${extra_debian_depends}"
+)
+if [ "${require_rkmpp}" = "1" ]; then
+  cmake_args+=(-DOPENHD_GLIDE_REQUIRE_RKMPP=ON)
+fi
+cmake "${cmake_args[@]}"
+cmake --build "${build_dir}" -j"${build_jobs}"
+cmake --build "${build_dir}" --target package
+
+package_file="$(find "${build_dir}" -maxdepth 1 -name '*.deb' -print -quit)"
+dpkg-deb -f "${package_file}" Depends
+for required in \
+  gstreamer1.0-tools \
+  gstreamer1.0-plugins-base \
+  gstreamer1.0-plugins-good \
+  gstreamer1.0-plugins-bad \
+  gstreamer1.0-plugins-ugly \
+  gstreamer1.0-libav; do
+  dpkg-deb -f "${package_file}" Depends | grep -q "${required}"
+done
+if [ "${require_rkmpp}" = "1" ]; then
+  for required in \
+    gstreamer1.0-rockchip1 \
+    librockchip-mpp1 \
+    librga2; do
+    dpkg-deb -f "${package_file}" Depends | grep -q "${required}"
+  done
+fi
+
+rm -rf /out/apt-archives
+cp "${build_dir}"/*.deb /out/
+rm -rf "${build_dir}"
