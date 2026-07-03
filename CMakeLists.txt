@@ -62,6 +62,7 @@ add_library(glide_common
     src/common/logging.cpp
     src/common/mavlink_state.cpp
     src/common/mavlink_udp_bridge.cpp
+    src/common/network_discovery.cpp
     src/common/preview_control.cpp
     src/platform/core_assignment.cpp
     src/platform/cpu_topology.cpp
@@ -423,6 +424,8 @@ install(
         examples/autorun-local-video-to-glide.sh
         examples/stream-blurbusters-1080p120-to-glide-view.sh
         examples/stream-h264-file-to-glide-view.sh
+        examples/stream-rpicam-to-glide.sh
+        examples/stream-videotestsrc-to-glide-auto.sh
         examples/stream-videotestsrc-to-glide-view.sh
         examples/run-wsl-flow-preview.sh
         examples/run-wsl-ui-preview.sh

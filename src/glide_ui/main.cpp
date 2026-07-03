@@ -100,6 +100,7 @@ int run_headless_ui(const HeadlessOptions& options)
         ipc.send_line("get topbar");
         ipc.send_line("get osd");
         ipc.send_line("get theme");
+        ipc.send_line("get net");
     } else {
         glide::log(glide::LogLevel::warning, "GlideUI", "IPC controller unavailable");
     }
@@ -242,6 +243,9 @@ struct UiState {
     std::uint32_t display_hz { 120 };
     std::uint32_t flow_fps { 60 };
     std::uint32_t flow_scale_percent { 50 };
+    bool net_scanning {};
+    std::string net_status { "Idle" };
+    std::vector<std::string> net_peers;
 };
 
 void dispatch_key(UiState& state, const char* key);
@@ -1086,6 +1090,13 @@ void send_mavlink_action(UiState& state, const std::string& line)
     }
 }
 
+void send_network_action(UiState& state, const std::string& line)
+{
+    if (state.ipc.connected()) {
+        state.ipc.send_line(line);
+    }
+}
+
 void send_openhd_param(UiState& state, const std::string& target, const std::string& param, const std::string& value)
 {
     send_mavlink_action(state, glide::mavlink::format_action_set_param(target, param, value));
@@ -1222,6 +1233,11 @@ void rebuild_ui(UiState& state)
     lv_obj_clean(state.root);
     build_overlay(state, static_cast<std::uint32_t>(width), static_cast<std::uint32_t>(height));
     state.panel_rebuild_pending = false;
+}
+
+bool panel_uses_network(SidebarPanel panel)
+{
+    return panel == SidebarPanel::link || panel == SidebarPanel::system;
 }
 
 void show_menu(UiState& state)
@@ -1737,6 +1753,50 @@ void build_link_panel(UiState& state)
     value_row(state, "Channel Width", std::to_string(state.mavlink.channel_width_mhz) + " MHz");
     value_row(state, "Modulation", "MCS " + std::to_string(state.mavlink.mcs_index));
     value_row(state, "TX Power", std::to_string(state.mavlink.tx_power_mw) + " mW");
+    auto* ethernet_section = label(state.panel_body, "Ethernet Glide", &lv_font_montserrat_18, 0xffffff);
+    lv_obj_set_width(ethernet_section, LV_PCT(100));
+    value_row(state, "Discovery", state.net_status, state.net_scanning ? 0xff8a00 : 0x20b383);
+    if (state.net_peers.empty()) {
+        value_row(state, "Peer", "None found", 0xb3c6d6);
+    } else {
+        for (const auto& peer : state.net_peers) {
+            value_row(state, "Peer", peer, 0x20b383);
+        }
+    }
+    auto* net_scan = action_button(state, "SCAN ETHERNET GLIDE");
+    lv_obj_add_event_cb(
+        net_scan,
+        [](lv_event_t* event) {
+            auto* state = static_cast<UiState*>(lv_event_get_user_data(event));
+            state->net_scanning = true;
+            state->net_status = "Scanning";
+            state->net_peers.clear();
+            send_network_action(*state, "net scan");
+            set_active_panel(*state, SidebarPanel::link);
+        },
+        LV_EVENT_CLICKED,
+        &state);
+    auto* p2p_ground = action_button(state, "P2P GROUND ETH0");
+    lv_obj_add_event_cb(
+        p2p_ground,
+        [](lv_event_t* event) {
+            auto* state = static_cast<UiState*>(lv_event_get_user_data(event));
+            send_network_action(*state, "net p2p ground eth0");
+        },
+        LV_EVENT_CLICKED,
+        &state);
+    auto* p2p_air = action_button(state, "P2P AIR ETH0");
+    lv_obj_add_event_cb(
+        p2p_air,
+        [](lv_event_t* event) {
+            auto* state = static_cast<UiState*>(lv_event_get_user_data(event));
+            send_network_action(*state, "net p2p air eth0");
+        },
+        LV_EVENT_CLICKED,
+        &state);
+
+    auto* radio_section = label(state.panel_body, "OpenHD Radio", &lv_font_montserrat_18, 0xffffff);
+    lv_obj_set_width(radio_section, LV_PCT(100));
     auto* width = action_button(state, "CYCLE CHANNEL WIDTH");
     lv_obj_add_event_cb(
         width,
@@ -2129,6 +2189,50 @@ void send_initial_ipc_requests(UiState& state, const char* backend_name)
     state.ipc.send_line("get topbar");
     state.ipc.send_line("get osd");
     state.ipc.send_line("get theme");
+    state.ipc.send_line("get net");
+}
+
+bool apply_network_state_line(UiState& state, const std::string& line)
+{
+    if (line == "state net idle") {
+        state.net_scanning = false;
+        state.net_status = "Idle";
+        return true;
+    }
+    if (line == "state net scanning") {
+        state.net_scanning = true;
+        state.net_status = "Scanning";
+        state.net_peers.clear();
+        return true;
+    }
+    if (line.rfind("state net peer ", 0) == 0) {
+        std::istringstream stream(line);
+        std::string state_word;
+        std::string net_word;
+        std::string peer_word;
+        std::string address;
+        std::string hostname;
+        std::string port;
+        stream >> state_word >> net_word >> peer_word >> address >> hostname >> port;
+        if (!address.empty()) {
+            const auto text = hostname.empty() ? address : hostname + " " + address + ":" + port;
+            if (std::find(state.net_peers.begin(), state.net_peers.end(), text) == state.net_peers.end()) {
+                state.net_peers.push_back(text);
+            }
+            state.net_status = "Peer found";
+        }
+        return true;
+    }
+    if (line.rfind("state net done ", 0) == 0) {
+        state.net_scanning = false;
+        state.net_status = state.net_peers.empty() ? "No peers" : "Ready";
+        return true;
+    }
+    if (line.rfind("state net p2p ", 0) == 0) {
+        state.net_status = line.substr(std::string("state net p2p ").size());
+        return true;
+    }
+    return false;
 }
 
 bool connect_ipc_if_needed(UiState& state, std::chrono::steady_clock::time_point now, const char* backend_name)
@@ -2487,6 +2591,10 @@ void poll_ipc(UiState& state, std::chrono::steady_clock::time_point now)
                 sync_osd_layout_controls(state);
             }
         } else if (apply_theme_state_line(state, line)) {
+        } else if (apply_network_state_line(state, line)) {
+            if (panel_uses_network(state.active_panel)) {
+                request_panel_rebuild(state, now);
+            }
         } else if (glide::mavlink::apply_ipc_line(state.mavlink, line)) {
             if (panel_uses_mavlink(state.active_panel)) {
                 request_panel_rebuild(state, now);

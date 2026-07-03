@@ -310,6 +310,35 @@ examples/stream-mjpeg-videotestsrc-to-glide.sh <target-ip> 5600
 ```
 
 Use the Pi's actual network IP as `<target-ip>`. For a sender running on the same Pi, use `127.0.0.1`.
+If both devices are running Glide on the same Ethernet subnet, scan for the receiver instead of typing
+an address:
+
+```sh
+./build-kms/openhd-glide --ethernet-discover --view-udp-port 5600
+examples/stream-videotestsrc-to-glide-auto.sh 5600
+```
+
+For a direct cable without a router, put one device in the ground preset and the other in the air preset,
+then run the same scan/stream command. Replace `eth0` with the actual Ethernet interface name if needed:
+
+```sh
+sudo ./build-kms/openhd-glide --ethernet-p2p ground eth0
+sudo ./build-kms/openhd-glide --ethernet-p2p air eth0
+```
+
+On a Raspberry Pi camera sender, use `rpicam-vid`/`libcamera-vid` directly for capture and H.264 encode,
+with GStreamer only packetizing the already encoded stream into RTP:
+
+```sh
+examples/stream-rpicam-to-glide.sh <target-ip> 5600
+examples/stream-rpicam-to-glide.sh auto 5600
+```
+
+When run from an interactive terminal, the script prints `rpicam-vid --list-cameras` output, lets you
+choose a sensor mode, then prompts for FPS and bitrate before starting the stream. Useful overrides are
+`GLIDE_CAMERA_INTERACTIVE=0`, `GLIDE_CAMERA_INDEX`, `GLIDE_CAMERA_WIDTH`, `GLIDE_CAMERA_HEIGHT`,
+`GLIDE_CAMERA_FPS`, `GLIDE_CAMERA_BITRATE`, and `GLIDE_RPICAM_EXTRA_ARGS`.
+
 The Linux sender requires a hardware encoder such as `v4l2h264enc` by default. Set
 `GLIDE_ALLOW_SOFTWARE_ENCODER=1` only when you intentionally want a non-performance `x264enc` fallback.
 The script performs a small encoder self-test first. If `v4l2h264enc` fails with `bcm2835-codec ... ret -3` in

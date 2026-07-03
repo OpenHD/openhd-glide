@@ -25,6 +25,7 @@
 #include "common/ipc.hpp"
 #include "common/mavlink_state.hpp"
 #include "common/mavlink_udp_bridge.hpp"
+#include "common/network_discovery.hpp"
 #include "common/preview_control.hpp"
 #include "dev/kms_atomic_compositor.hpp"
 #include "dev/kms_dmabuf_video_plane.hpp"
@@ -293,6 +294,10 @@ struct Options {
     std::uint32_t writeback_record_frames { 30 };
     std::uint32_t writeback_record_every { 6 };
     bool mavlink_udp { true };
+    bool ethernet_discover {};
+    bool ethernet_p2p {};
+    std::string ethernet_p2p_role { "ground" };
+    std::string ethernet_p2p_interface {};
 };
 
 struct RuntimeControlState {
@@ -304,6 +309,7 @@ struct RuntimeControlState {
 };
 
 void start_mavlink_bridge(glide::mavlink::UdpBridge& bridge, const Options& options);
+void start_network_discovery(glide::net::DiscoveryService& discovery, const Options& options);
 
 void send_initial_control_state(glide::ipc::Server& ipc_server, int client_id, const RuntimeControlState& state)
 {
@@ -315,9 +321,48 @@ void send_initial_control_state(glide::ipc::Server& ipc_server, int client_id, c
     send_theme_state(ipc_server, client_id);
 }
 
+void send_network_state(glide::ipc::Server& ipc_server, int client_id, const glide::net::DiscoveryService& discovery)
+{
+    ipc_server.send_line(client_id, "state net idle");
+    for (const auto& peer : discovery.peers()) {
+        ipc_server.send_line(client_id, "state net peer " + peer.address + " " + peer.hostname + " " + std::to_string(peer.video_port));
+    }
+}
+
+bool handle_network_line(const std::string& line, glide::ipc::Server& ipc_server, int client_id, glide::net::DiscoveryService& discovery)
+{
+    if (line == "get net") {
+        send_network_state(ipc_server, client_id, discovery);
+        return true;
+    }
+    if (line == "net scan") {
+        discovery.start_scan();
+        return true;
+    }
+    if (line.rfind("net p2p ", 0) == 0) {
+        std::istringstream stream(line);
+        std::string prefix;
+        std::string command;
+        std::string role;
+        std::string interface_name;
+        stream >> prefix >> command >> role >> interface_name;
+        const auto result = glide::net::configure_point_to_point(glide::net::PointToPointOptions {
+            .interface_name = interface_name,
+            .role = role,
+        });
+        ipc_server.broadcast_line("state net p2p " + result);
+        if (result.rfind("ok ", 0) == 0) {
+            discovery.start_scan();
+        }
+        return true;
+    }
+    return false;
+}
+
 bool poll_runtime_controls(
     glide::ipc::Server& ipc_server,
     glide::mavlink::UdpBridge& mavlink_bridge,
+    glide::net::DiscoveryService& discovery,
     RuntimeControlState& state,
     glide::mavlink::Snapshot& mavlink)
 {
@@ -335,9 +380,13 @@ bool poll_runtime_controls(
         }
         ipc_server.broadcast_line(line);
     }
+    for (const auto& line : discovery.poll_state_lines()) {
+        ipc_server.broadcast_line(line);
+    }
     for (const auto& event : ipc_server.poll()) {
         if (event.line.rfind("hello ", 0) == 0) {
             send_initial_control_state(ipc_server, event.client_id, state);
+            send_network_state(ipc_server, event.client_id, discovery);
         } else if (event.line == "get fps") {
             ipc_server.send_line(event.client_id, std::string("state fps ") + (state.fps_enabled ? "1" : "0"));
         } else if (event.line == "get coords") {
@@ -350,6 +399,7 @@ bool poll_runtime_controls(
             ipc_server.send_line(event.client_id, "state osd " + state.osd_layout);
         } else if (event.line == "get theme") {
             send_theme_state(ipc_server, event.client_id);
+        } else if (handle_network_line(event.line, ipc_server, event.client_id, discovery)) {
         } else if (event.line == "set fps 0" || event.line == "set fps 1") {
             state.fps_enabled = event.line.back() == '1';
             glide::preview_control::set_fps_overlay_enabled(state.fps_enabled);
@@ -476,6 +526,12 @@ Options parse_options(int argc, char** argv)
             options.writeback_record_every = static_cast<std::uint32_t>(std::stoul(argv[++i]));
         } else if (argument == "--no-mavlink") {
             options.mavlink_udp = false;
+        } else if (argument == "--ethernet-discover") {
+            options.ethernet_discover = true;
+        } else if (argument == "--ethernet-p2p" && i + 2 < argc) {
+            options.ethernet_p2p = true;
+            options.ethernet_p2p_role = argv[++i];
+            options.ethernet_p2p_interface = argv[++i];
         }
     }
     if (options.flow_primary_readback) {
@@ -1118,11 +1174,13 @@ int run_kms_video_preview(const Options& options)
     }
     glide::mavlink::UdpBridge mavlink_bridge;
     start_mavlink_bridge(mavlink_bridge, options);
+    glide::net::DiscoveryService network_discovery;
+    start_network_discovery(network_discovery, options);
     const auto poll_control = [&]() {
         if (ipc_enabled) {
             const auto now = std::chrono::steady_clock::now();
             std::lock_guard<std::mutex> lock(mavlink_snapshot_mutex);
-            if (poll_runtime_controls(ipc_server, mavlink_bridge, control_state, mavlink_snapshot)) {
+            if (poll_runtime_controls(ipc_server, mavlink_bridge, network_discovery, control_state, mavlink_snapshot)) {
                 last_telemetry_time = now;
                 telemetry_signal_present.store(true, std::memory_order_relaxed);
             } else if (last_telemetry_time != std::chrono::steady_clock::time_point {}
@@ -2233,9 +2291,32 @@ void start_mavlink_bridge(glide::mavlink::UdpBridge& bridge, const Options& opti
     }
 }
 
+void start_network_discovery(glide::net::DiscoveryService& discovery, const Options& options)
+{
+    if (discovery.start(glide::net::DiscoveryOptions {
+            .discovery_udp_port = glide::net::discovery_port,
+            .video_udp_port = options.view_udp_port,
+            .role = "glide",
+        })) {
+        glide::log(
+            glide::LogLevel::info,
+            "OpenHD-Glide",
+            "Ethernet Glide discovery listening on UDP/0.0.0.0:" + std::to_string(glide::net::discovery_port));
+    } else {
+        glide::log(glide::LogLevel::warning, "OpenHD-Glide", "Ethernet discovery disabled: " + discovery.last_error());
+    }
+}
+
 void broadcast_mavlink_updates(glide::mavlink::UdpBridge& bridge, glide::ipc::Server& ipc_server)
 {
     for (const auto& line : bridge.poll()) {
+        ipc_server.broadcast_line(line);
+    }
+}
+
+void broadcast_network_updates(glide::net::DiscoveryService& discovery, glide::ipc::Server& ipc_server)
+{
+    for (const auto& line : discovery.poll_state_lines()) {
         ipc_server.broadcast_line(line);
     }
 }
@@ -2290,6 +2371,8 @@ int run_preview_stack(char* argv0, const Options& options)
     }
     glide::mavlink::UdpBridge mavlink_bridge;
     start_mavlink_bridge(mavlink_bridge, options);
+    glide::net::DiscoveryService network_discovery;
+    start_network_discovery(network_discovery, options);
 
     glide::log(glide::LogLevel::info, "OpenHD-Glide", "starting WSL preview stack");
     const auto view_pid = launch_child(video_args);
@@ -2332,6 +2415,7 @@ int run_preview_stack(char* argv0, const Options& options)
 
     while (stop_requested == 0) {
         broadcast_mavlink_updates(mavlink_bridge, ipc_server);
+        broadcast_network_updates(network_discovery, ipc_server);
         for (const auto& event : ipc_server.poll()) {
             std::cout << "ipc[" << event.client_id << "] " << event.line << '\n';
             if (event.line.rfind("hello ", 0) == 0) {
@@ -2341,6 +2425,7 @@ int run_preview_stack(char* argv0, const Options& options)
                 ipc_server.send_line(event.client_id, std::string("state topbar ") + (top_bar_enabled ? "1" : "0"));
                 ipc_server.send_line(event.client_id, "state osd " + osd_layout);
                 send_theme_state(ipc_server, event.client_id);
+                send_network_state(ipc_server, event.client_id, network_discovery);
             } else if (event.line == "get fps") {
                 ipc_server.send_line(event.client_id, std::string("state fps ") + (fps_enabled ? "1" : "0"));
             } else if (event.line == "get coords") {
@@ -2353,6 +2438,7 @@ int run_preview_stack(char* argv0, const Options& options)
                 ipc_server.send_line(event.client_id, "state osd " + osd_layout);
             } else if (event.line == "get theme") {
                 send_theme_state(ipc_server, event.client_id);
+            } else if (handle_network_line(event.line, ipc_server, event.client_id, network_discovery)) {
             } else if (event.line == "set fps 0" || event.line == "set fps 1") {
                 fps_enabled = event.line.back() == '1';
                 glide::preview_control::set_fps_overlay_enabled(fps_enabled);
@@ -2442,6 +2528,8 @@ int run_kms_stack(char* argv0, const Options& options)
     }
     glide::mavlink::UdpBridge mavlink_bridge;
     start_mavlink_bridge(mavlink_bridge, options);
+    glide::net::DiscoveryService network_discovery;
+    start_network_discovery(network_discovery, options);
 
     glide::log(glide::LogLevel::info, "OpenHD-Glide", "starting device DRM/KMS stack");
     const auto view_pid = launch_child(video_args);
@@ -2497,6 +2585,7 @@ int run_kms_stack(char* argv0, const Options& options)
 
     while (stop_requested == 0) {
         broadcast_mavlink_updates(mavlink_bridge, ipc_server);
+        broadcast_network_updates(network_discovery, ipc_server);
         for (const auto& event : ipc_server.poll()) {
             std::cout << "ipc[" << event.client_id << "] " << event.line << '\n';
             if (event.line.rfind("hello ", 0) == 0) {
@@ -2506,6 +2595,7 @@ int run_kms_stack(char* argv0, const Options& options)
                 ipc_server.send_line(event.client_id, std::string("state topbar ") + (top_bar_enabled ? "1" : "0"));
                 ipc_server.send_line(event.client_id, "state osd " + osd_layout);
                 send_theme_state(ipc_server, event.client_id);
+                send_network_state(ipc_server, event.client_id, network_discovery);
             } else if (event.line == "get fps") {
                 ipc_server.send_line(event.client_id, std::string("state fps ") + (fps_enabled ? "1" : "0"));
             } else if (event.line == "get coords") {
@@ -2518,6 +2608,7 @@ int run_kms_stack(char* argv0, const Options& options)
                 ipc_server.send_line(event.client_id, "state osd " + osd_layout);
             } else if (event.line == "get theme") {
                 send_theme_state(ipc_server, event.client_id);
+            } else if (handle_network_line(event.line, ipc_server, event.client_id, network_discovery)) {
             } else if (event.line == "set fps 0" || event.line == "set fps 1") {
                 fps_enabled = event.line.back() == '1';
                 glide::preview_control::set_fps_overlay_enabled(fps_enabled);
@@ -2592,6 +2683,26 @@ int run_kms_stack(char*, const Options&)
 int main(int argc, char** argv)
 {
     const auto options = parse_options(argc, argv);
+    if (options.ethernet_p2p) {
+        const auto result = glide::net::configure_point_to_point(glide::net::PointToPointOptions {
+            .interface_name = options.ethernet_p2p_interface,
+            .role = options.ethernet_p2p_role,
+        });
+        std::cout << result << '\n';
+        return result.rfind("ok ", 0) == 0 ? 0 : 1;
+    }
+    if (options.ethernet_discover) {
+        const auto peers = glide::net::scan_blocking(glide::net::discovery_port, options.view_udp_port);
+        if (peers.empty()) {
+            std::cout << "no Glide peers found on the current subnet\n";
+            return 1;
+        }
+        for (const auto& peer : peers) {
+            std::cout << peer.hostname << " " << peer.address << ":" << peer.video_port << '\n';
+        }
+        return 0;
+    }
+
     glide::log(glide::LogLevel::info, "OpenHD-Glide", "starting hardware discovery");
 
     const auto drm = glide::platform::probe_drm_planes();
