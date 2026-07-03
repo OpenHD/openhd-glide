@@ -72,12 +72,28 @@ openhd_glide_normalize_apt_sources() {
           -e 's|Suites: bullseye|Suites: bookworm|g' \
           "${source_file}"
       fi
+      if grep -q 'radxa-repo.github.io/bookworm' "${source_file}"; then
+        case "${source_file}" in
+          *.sources)
+            sudo sed -i -E \
+              -e 's|^Signed-By:.*$|Signed-By: /usr/share/keyrings/radxa-archive-keyring.gpg|g' \
+              "${source_file}"
+            ;;
+          *)
+            sudo sed -i -E \
+              -e 's|\[signed-by=[^]]+\]|[signed-by=/usr/share/keyrings/radxa-archive-keyring.gpg]|g' \
+              -e '\|radxa-repo.github.io/bookworm|{ /\[signed-by=/! s|^deb |deb [signed-by=/usr/share/keyrings/radxa-archive-keyring.gpg] | }' \
+              "${source_file}"
+            ;;
+        esac
+        if [[ "${source_file}" == *.sources ]] && ! grep -q '^Signed-By:' "${source_file}"; then
+          printf '%s\n' 'Signed-By: /usr/share/keyrings/radxa-archive-keyring.gpg' | sudo tee -a "${source_file}" >/dev/null
+        fi
+      fi
     done < <(find /etc/apt -type f \( -name 'sources.list' -o -name '*.list' -o -name '*.sources' \) -print0 2>/dev/null)
-    if ! grep -Rqs 'radxa-repo.github.io/bookworm' /etc/apt/sources.list /etc/apt/sources.list.d; then
-      sudo tee /etc/apt/sources.list.d/radxa-bookworm.list >/dev/null <<'APT_SOURCES'
+    sudo tee /etc/apt/sources.list.d/70-bookworm.list >/dev/null <<'APT_SOURCES'
 deb [signed-by=/usr/share/keyrings/radxa-archive-keyring.gpg] https://radxa-repo.github.io/bookworm/ bookworm main
 APT_SOURCES
-    fi
     sudo tee /etc/apt/sources.list.d/openhd-bookworm.list >/dev/null <<'APT_SOURCES'
 deb http://deb.debian.org/debian bookworm main contrib non-free non-free-firmware
 deb http://deb.debian.org/debian bookworm-updates main contrib non-free non-free-firmware
