@@ -58,8 +58,8 @@ The video path has priority over everything else. `GlideView` should be able to 
 - `openhd-glide --preview-stack` and `--kms-stack` include a controller-owned MAVLink UDP bridge on port 14550 by default. It decodes common MAVLink telemetry and OpenHD/QOpenHD parameter/status traffic into the existing `mav ...` IPC state lines for OSD/UI use, and translates UI `mav set ...` / `mav command ...` actions back to MAVLink packets once a UDP peer is known.
 - `glide-ui` has a first LVGL QOpenHD-style sidebar shell: large icon rail, `Find Air Unit` scan panel, and an FPS overlay toggle in the `MISC` panel. In WSL the UI window is sized as a sidebar surface, not a transparent full-screen overlay.
 - On the device stack, `glide-ui --headless` is used until the LVGL shared-buffer/plane backend exists. Do not make the UI a DRM/KMS master.
-- `glide-view --udp-video --udp-port 5600` uses GStreamer to receive RTP/H.264 over UDP and decode into `appsink`. It must not use `kmssink` because only `openhd-glide` should own KMS. It prefers `v4l2h264dec`/`v4l2slh264dec` and warns if it falls back to `avdec_h264`.
-- `openhd-glide --kms-video-preview` is the first controller-owned visible video path: it receives RTP/H.264, requests `video/x-raw(memory:DMABuf),format=DMA_DRM` from `v4l2h264dec`, imports decoded FDs with DRM, and scans them out on a KMS video plane. It keeps a black primary framebuffer only to keep the CRTC active.
+- `glide-view --udp-video --udp-port 5600` uses GStreamer to receive RTP video over UDP and decode into `appsink`. It supports H.264, H.265, and MJPEG via `--udp-codec h264|h265|mjpeg`. It must not use `kmssink` because only `openhd-glide` should own KMS.
+- `openhd-glide --kms-video-preview` is the first controller-owned visible video path: it can receive RTP/H.264, RTP/H.265, or RTP/MJPEG through the GStreamer path. H.264/H.265 try to request DMABUF decode surfaces where available; MJPEG is a CPU decoded bring-up path for platforms such as Raspberry Pi 5. It keeps a black primary framebuffer only to keep the CRTC active.
 - Example senders live in `examples/stream-videotestsrc-to-glide-view.sh` and `.bat`.
 
 ## CPU Assignment Policy

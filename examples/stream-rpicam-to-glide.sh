@@ -20,10 +20,7 @@ PORT="${2:-5600}"
 WIDTH="${GLIDE_CAMERA_WIDTH:-1280}"
 HEIGHT="${GLIDE_CAMERA_HEIGHT:-720}"
 FPS="${GLIDE_CAMERA_FPS:-60}"
-BITRATE="${GLIDE_CAMERA_BITRATE:-6000000}"
-INTRA="${GLIDE_CAMERA_INTRA:-}"
-PROFILE="${GLIDE_CAMERA_PROFILE:-high}"
-LEVEL="${GLIDE_CAMERA_LEVEL:-4.2}"
+QUALITY="${GLIDE_MJPEG_QUALITY:-85}"
 CAMERA_INDEX="${GLIDE_CAMERA_INDEX:-}"
 
 prompt_default() {
@@ -71,7 +68,7 @@ elif command -v libcamera-vid >/dev/null 2>&1; then
   CAMERA_BIN="libcamera-vid"
 else
   echo "missing rpicam-vid/libcamera-vid" >&2
-  echo "Install Raspberry Pi camera apps and verify the camera with: rpicam-vid -t 2000 -o /tmp/test.h264" >&2
+  echo "Install Raspberry Pi camera apps and verify the camera with: rpicam-vid -t 2000 --codec mjpeg -o /tmp/test.mjpeg" >&2
   exit 1
 fi
 
@@ -157,27 +154,20 @@ choose_camera_settings() {
   fi
 
   FPS="$(prompt_default "Frame rate" "$FPS")"
-  BITRATE="$(prompt_default "H.264 bitrate bits/s" "$BITRATE")"
+  QUALITY="$(prompt_default "MJPEG quality 1-100" "$QUALITY")"
 }
 
 choose_camera_settings
 
-if [ -z "$INTRA" ]; then
-  INTRA="${FPS%.*}"
-  if [ -z "$INTRA" ] || [ "$INTRA" = "0" ]; then
-    INTRA=30
-  fi
-fi
-
-for element in fdsrc h264parse rtph264pay udpsink; do
+for element in fdsrc jpegparse rtpjpegpay udpsink; do
   if ! gst-inspect-1.0 "$element" >/dev/null 2>&1; then
     echo "missing GStreamer element: $element" >&2
     exit 1
   fi
 done
 
-echo "Streaming ${CAMERA_BIN} H.264 camera video to ${TARGET}:${PORT}" >&2
-echo "  ${WIDTH}x${HEIGHT}@${FPS} bitrate=${BITRATE} intra=${INTRA}" >&2
+echo "Streaming ${CAMERA_BIN} RTP/MJPEG camera video to ${TARGET}:${PORT}" >&2
+echo "  ${WIDTH}x${HEIGHT}@${FPS} quality=${QUALITY}" >&2
 if [ -n "$CAMERA_INDEX" ]; then
   echo "  camera=${CAMERA_INDEX}" >&2
 fi
@@ -186,15 +176,11 @@ echo "  camera/encoder path: ${CAMERA_BIN}; GStreamer only packetizes RTP" >&2
 set -o pipefail
 CAMERA_ARGS=(
   --timeout 0
-  --codec h264
-  --inline
-  --profile "$PROFILE"
-  --level "$LEVEL"
+  --codec mjpeg
   --width "$WIDTH"
   --height "$HEIGHT"
   --framerate "$FPS"
-  --bitrate "$BITRATE"
-  --intra "$INTRA"
+  --quality "$QUALITY"
   --output -
   --nopreview
 )
@@ -208,7 +194,6 @@ fi
   ${GLIDE_RPICAM_EXTRA_ARGS:-} \
   | gst-launch-1.0 -v \
       fdsrc fd=0 do-timestamp=true ! \
-      h264parse config-interval=1 ! \
-      "video/x-h264,stream-format=byte-stream,alignment=au" ! \
-      rtph264pay pt=96 config-interval=1 mtu=1200 ! \
+      jpegparse ! \
+      rtpjpegpay pt=96 mtu=1200 ! \
       udpsink host="${TARGET}" port="${PORT}" sync=false async=false

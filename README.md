@@ -326,8 +326,8 @@ sudo ./build-kms/openhd-glide --ethernet-p2p ground eth0
 sudo ./build-kms/openhd-glide --ethernet-p2p air eth0
 ```
 
-On a Raspberry Pi camera sender, use `rpicam-vid`/`libcamera-vid` directly for capture and H.264 encode,
-with GStreamer only packetizing the already encoded stream into RTP:
+On a Raspberry Pi 5 camera sender, use `rpicam-vid`/`libcamera-vid` directly for MJPEG capture,
+with GStreamer only packetizing the camera stream into RTP:
 
 ```sh
 examples/stream-rpicam-to-glide.sh <target-ip> 5600
@@ -335,17 +335,17 @@ examples/stream-rpicam-to-glide.sh auto 5600
 ```
 
 When run from an interactive terminal, the script prints `rpicam-vid --list-cameras` output, lets you
-choose a sensor mode, then prompts for FPS and bitrate before starting the stream. Useful overrides are
+choose a sensor mode, then prompts for FPS and MJPEG quality before starting the stream. Useful overrides are
 `GLIDE_CAMERA_INTERACTIVE=0`, `GLIDE_CAMERA_INDEX`, `GLIDE_CAMERA_WIDTH`, `GLIDE_CAMERA_HEIGHT`,
-`GLIDE_CAMERA_FPS`, `GLIDE_CAMERA_BITRATE`, and `GLIDE_RPICAM_EXTRA_ARGS`.
+`GLIDE_CAMERA_FPS`, `GLIDE_MJPEG_QUALITY`, and `GLIDE_RPICAM_EXTRA_ARGS`.
 
-The Linux sender requires a hardware encoder such as `v4l2h264enc` by default. Set
-`GLIDE_ALLOW_SOFTWARE_ENCODER=1` only when you intentionally want a non-performance `x264enc` fallback.
-The script performs a small encoder self-test first. If `v4l2h264enc` fails with `bcm2835-codec ... ret -3` in
+The Linux H.264 videotest sender, `examples/stream-videotestsrc-to-glide-view.sh`, requires a hardware encoder
+such as `v4l2h264enc` by default. Set `GLIDE_ALLOW_SOFTWARE_ENCODER=1` only when you intentionally want a
+non-performance `x264enc` fallback. That script performs a small encoder self-test first. If `v4l2h264enc` fails with `bcm2835-codec ... ret -3` in
 `dmesg`, the Raspberry Pi encoder driver is failing independently of Glide; use another sender with hardware H.264 or
 fix the Pi encoder stack before using it for performance measurements.
-For Raspberry Pi 5 MJPEG bring-up, use `examples/stream-mjpeg-videotestsrc-to-glide.sh`; it uses `jpegenc`
-and `rtpjpegpay` instead of an H.264 encoder.
+For Raspberry Pi 5 MJPEG test-pattern bring-up without a camera, use `examples/stream-mjpeg-videotestsrc-to-glide.sh`;
+it uses `jpegenc` and `rtpjpegpay` instead of an H.264 encoder.
 
 To avoid sender-side encoding entirely, stream a downloaded H.264 MP4:
 
