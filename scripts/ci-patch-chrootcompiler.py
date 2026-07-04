@@ -64,6 +64,16 @@ openhd_glide_normalize_apt_sources() {
     echo "[apt-preflight] Ensuring Bookworm apt sources..."
     radxa_repo_suite="$(cat /opt/additionalFiles/radxa_repo_suite.txt 2>/dev/null || printf 'bookworm')"
     while IFS= read -r -d '' source_file; do
+      case "${source_file}" in
+        /etc/apt/sources.list.d/openhd-bookworm.list)
+          sudo rm -f "${source_file}"
+          continue
+          ;;
+      esac
+      sudo sed -i -E \
+        -e 's|https?://archive\.debian\.org/debian|http://deb.debian.org/debian|g' \
+        -e 's|https?://archive\.debian\.org/debian-security|http://security.debian.org/debian-security|g' \
+        "${source_file}" 2>/dev/null || true
       if grep -q 'radxa-repo.github.io/bullseye' "${source_file}"; then
         sudo sed -i -E \
           -e "s|https://radxa-repo.github.io/bullseye/?|https://radxa-repo.github.io/${radxa_repo_suite}/|g" \
@@ -95,12 +105,14 @@ openhd_glide_normalize_apt_sources() {
     sudo tee "/etc/apt/sources.list.d/70-radxa-${radxa_repo_suite}.list" >/dev/null <<APT_SOURCES
 deb [signed-by=/usr/share/keyrings/radxa-archive-keyring.gpg] https://radxa-repo.github.io/${radxa_repo_suite}/ ${radxa_repo_suite} main
 APT_SOURCES
-    sudo tee /etc/apt/sources.list.d/openhd-bookworm.list >/dev/null <<'APT_SOURCES'
+    if ! grep -RqsE '^deb .*deb\.debian\.org/debian[[:space:]]+bookworm([[:space:]]|$)' /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null; then
+      sudo tee /etc/apt/sources.list.d/openhd-bookworm.list >/dev/null <<'APT_SOURCES'
 deb http://deb.debian.org/debian bookworm main contrib non-free non-free-firmware
 deb http://deb.debian.org/debian bookworm-updates main contrib non-free non-free-firmware
 deb http://deb.debian.org/debian bookworm-backports main contrib non-free non-free-firmware
 deb http://security.debian.org/debian-security bookworm-security main contrib non-free non-free-firmware
 APT_SOURCES
+    fi
   elif [[ "${DISTRO}" == "bullseye" ]]; then
     echo "[apt-preflight] Normalizing Bullseye apt sources..."
     while IFS= read -r -d '' source_file; do
@@ -196,6 +208,28 @@ APT_SOURCES
         if radxa_cm3_old not in packages_text:
             raise SystemExit("Could not find Radxa CM3 package-stage repo block")
         packages_text = packages_text.replace(radxa_cm3_old, radxa_cm3_new, 1)
+        packages_stage.write_text(packages_text)
+
+    packages_text = packages_stage.read_text()
+    rock5_bookworm_marker = "# openhd_glide_rock5_bookworm_sources"
+    if rock5_bookworm_marker not in packages_text:
+        packages_text = packages_text.replace(
+            "  normalize_bullseye_sources\n\n  if ! apt_update_tolerant; then",
+            f"  normalize_bullseye_sources\n  {rock5_bookworm_marker}\n  if [[ \"${{DISTRO}}\" == \"bookworm\" ]]; then\n    openhd_glide_normalize_apt_sources\n  fi\n\n  if ! apt_update_tolerant; then",
+            1,
+        )
+        packages_text = packages_text.replace(
+            "    disable_backports_everywhere\n    if ! apt_update_tolerant; then",
+            "    disable_backports_everywhere\n    if [[ \"${DISTRO}\" == \"bookworm\" ]]; then\n      openhd_glide_normalize_apt_sources\n    fi\n    if ! apt_update_tolerant; then",
+            1,
+        )
+        packages_text = packages_text.replace(
+            "      disable_security_everywhere\n      apt_update_tolerant || {",
+            "      disable_security_everywhere\n      if [[ \"${DISTRO}\" == \"bookworm\" ]]; then\n        openhd_glide_normalize_apt_sources\n      fi\n      apt_update_tolerant || {",
+            1,
+        )
+        if rock5_bookworm_marker not in packages_text:
+            raise SystemExit("Could not patch Rock5 Bookworm apt preflight")
         packages_stage.write_text(packages_text)
 
     packages_text = packages_stage.read_text()

@@ -67,7 +67,14 @@ install_radxa_archive_keyring() {
 install_radxa_archive_keyring
 
 if [ "${target_release}" = "bookworm" ]; then
+  rm -f /etc/apt/sources.list.d/openhd-bookworm.list
   for source_file in /etc/apt/sources.list /etc/apt/sources.list.d/*.list; do
+    if [ -f "${source_file}" ]; then
+      sudo sed -i -E \
+        -e 's|https?://archive\.debian\.org/debian|http://deb.debian.org/debian|g' \
+        -e 's|https?://archive\.debian\.org/debian-security|http://security.debian.org/debian-security|g' \
+        "${source_file}"
+    fi
     if [ -f "${source_file}" ] && grep -q 'radxa-repo.github.io/bullseye' "${source_file}"; then
       sudo sed -i -E \
         -e "s|https://radxa-repo.github.io/bullseye/?|https://radxa-repo.github.io/${radxa_repo_suite}/|g" \
@@ -84,6 +91,12 @@ if [ "${target_release}" = "bookworm" ]; then
     fi
   done
   for source_file in /etc/apt/sources.list.d/*.sources; do
+    if [ -f "${source_file}" ]; then
+      sudo sed -i -E \
+        -e 's|https?://archive\.debian\.org/debian|http://deb.debian.org/debian|g' \
+        -e 's|https?://archive\.debian\.org/debian-security|http://security.debian.org/debian-security|g' \
+        "${source_file}"
+    fi
     if [ -f "${source_file}" ] && grep -q 'radxa-repo.github.io/bullseye' "${source_file}"; then
       sudo sed -i -E \
         -e "s|https://radxa-repo.github.io/bullseye/?|https://radxa-repo.github.io/${radxa_repo_suite}/|g" \
@@ -104,6 +117,14 @@ if [ "${target_release}" = "bookworm" ]; then
   sudo tee /etc/apt/sources.list.d/70-radxa-${radxa_repo_suite}.list >/dev/null <<APT_SOURCES
 deb [signed-by=/usr/share/keyrings/radxa-archive-keyring.gpg] https://radxa-repo.github.io/${radxa_repo_suite}/ ${radxa_repo_suite} main
 APT_SOURCES
+  if ! grep -RqsE '^deb .*deb\.debian\.org/debian[[:space:]]+bookworm([[:space:]]|$)' /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null; then
+    sudo tee /etc/apt/sources.list.d/openhd-bookworm.list >/dev/null <<'APT_SOURCES'
+deb http://deb.debian.org/debian bookworm main contrib non-free non-free-firmware
+deb http://deb.debian.org/debian bookworm-updates main contrib non-free non-free-firmware
+deb http://deb.debian.org/debian bookworm-backports main contrib non-free non-free-firmware
+deb http://security.debian.org/debian-security bookworm-security main contrib non-free non-free-firmware
+APT_SOURCES
+  fi
 elif [ "${target_release}" = "bullseye" ]; then
   for source_file in /etc/apt/sources.list /etc/apt/sources.list.d/*.list; do
     [ -f "${source_file}" ] && sudo sed -i '\|bullseye-backports|d' "${source_file}"
