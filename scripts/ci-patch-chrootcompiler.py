@@ -164,15 +164,38 @@ openhd_glide_normalize_apt_sources
         packages_stage.write_text(packages_text)
 
     packages_text = packages_stage.read_text()
-    out_mount_marker = "# openhd_glide_bind_out_guard"
-    out_link_needle = """HOST=$(cat /opt/additionalFiles/mount.txt)
-mkdir /host
-mount $HOST /host
-INDIR=$(cat /opt/additionalFiles/pwd.txt)
-OUTDIR="/host"$INDIR
-ln -s $OUTDIR /out
-rm -Rf /out/*
+    radxa_cm3_marker = "# openhd_glide_radxa_cm3_repo_suite"
+    radxa_cm3_old = """if [[ "${OS}" == "radxa-debian-rock-cm3" ]]; then
+  sudo apt-key del E572249A33EB9743 5D93177D0752732A >/dev/null 2>&1 || true
+  wget -qO - https://radxa-repo.github.io/bullseye/public.key | sudo tee /usr/share/keyrings/radxa-apt-keyring.gpg >/dev/null
+  echo "deb [signed-by=/usr/share/keyrings/radxa-apt-keyring.gpg] https://radxa-repo.github.io/bullseye bullseye main" | sudo tee /etc/apt/sources.list.d/radxa.list
+  openhd_glide_normalize_apt_sources
+  sudo apt-get update
 """
+    radxa_cm3_new = f"""if [[ "${{OS}}" == "radxa-debian-rock-cm3" ]]; then
+  {radxa_cm3_marker}
+  sudo apt-key del E572249A33EB9743 5D93177D0752732A >/dev/null 2>&1 || true
+  radxa_repo_suite="$(cat /opt/additionalFiles/radxa_repo_suite.txt 2>/dev/null || printf 'bullseye')"
+  if [[ "${{radxa_repo_suite}}" == "bullseye" ]]; then
+    wget -qO - https://radxa-repo.github.io/bullseye/public.key | sudo tee /usr/share/keyrings/radxa-apt-keyring.gpg >/dev/null
+    echo "deb [signed-by=/usr/share/keyrings/radxa-apt-keyring.gpg] https://radxa-repo.github.io/bullseye bullseye main" | sudo tee /etc/apt/sources.list.d/radxa.list
+  else
+    install_radxa_archive_keyring
+    sudo rm -f /etc/apt/sources.list.d/radxa.list
+    sudo tee "/etc/apt/sources.list.d/70-radxa-${{radxa_repo_suite}}.list" >/dev/null <<APT_SOURCES
+deb [signed-by=/usr/share/keyrings/radxa-archive-keyring.gpg] https://radxa-repo.github.io/${{radxa_repo_suite}}/ ${{radxa_repo_suite}} main
+APT_SOURCES
+  fi
+  sudo apt-get update
+"""
+    if radxa_cm3_marker not in packages_text:
+        if radxa_cm3_old not in packages_text:
+            raise SystemExit("Could not find Radxa CM3 package-stage repo block")
+        packages_text = packages_text.replace(radxa_cm3_old, radxa_cm3_new, 1)
+        packages_stage.write_text(packages_text)
+
+    packages_text = packages_stage.read_text()
+    out_mount_marker = "# openhd_glide_bind_out_guard"
     out_link_patch = f"""{out_mount_marker}
 if mountpoint -q /out; then
   rm -Rf /out/*
@@ -187,9 +210,19 @@ else
 fi
 """
     if out_mount_marker not in packages_text:
-        if out_link_needle not in packages_text:
+        out_link_pattern = re.compile(
+            r'HOST=\$\(cat /opt/additionalFiles/mount\.txt\)\n'
+            r'mkdir /host\n'
+            r'mount \$HOST /host\n'
+            r'INDIR=\$\(cat /opt/additionalFiles/pwd\.txt\)\n'
+            r'OUTDIR="/host"\$INDIR\n'
+            r'ln -s \$OUTDIR /out\n'
+            r'rm -Rf /out/\*\n'
+        )
+        packages_text, replacements = out_link_pattern.subn(out_link_patch, packages_text, count=1)
+        if replacements != 1:
             raise SystemExit("Could not find package-stage /out symlink block")
-        packages_stage.write_text(packages_text.replace(out_link_needle, out_link_patch, 1))
+        packages_stage.write_text(packages_text)
 
 
 def patch_common_chroot_mount() -> None:
