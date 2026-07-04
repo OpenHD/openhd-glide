@@ -134,11 +134,31 @@ deb http://security.debian.org/debian-security bookworm-security main contrib no
 APT_SOURCES
   fi
 elif [ "${target_release}" = "bullseye" ]; then
+  if [ "${radxa_repo_suite}" = "direct-bullseye" ]; then
+    rm -f \
+      /etc/apt/sources.list.d/radxa.list \
+      /etc/apt/sources.list.d/radxa-rockchip.list \
+      /etc/apt/sources.list.d/70-radxa-*.list
+  fi
   for source_file in /etc/apt/sources.list /etc/apt/sources.list.d/*.list; do
-    [ -f "${source_file}" ] && sudo sed -i '\|bullseye-backports|d' "${source_file}"
+    if [ -f "${source_file}" ]; then
+      if [ "${radxa_repo_suite}" = "direct-bullseye" ] && grep -q 'radxa-repo.github.io' "${source_file}"; then
+        case "${source_file}" in
+          /etc/apt/sources.list.d/*) rm -f "${source_file}"; continue ;;
+          *) sudo sed -i '\|radxa-repo.github.io|d' "${source_file}" ;;
+        esac
+      fi
+      sudo sed -i '\|bullseye-backports|d' "${source_file}"
+    fi
   done
   for source_file in /etc/apt/sources.list.d/*.sources; do
-    [ -f "${source_file}" ] && grep -q 'bullseye-backports' "${source_file}" && sudo rm -f "${source_file}"
+    if [ -f "${source_file}" ]; then
+      if [ "${radxa_repo_suite}" = "direct-bullseye" ] && grep -q 'radxa-repo.github.io' "${source_file}"; then
+        rm -f "${source_file}"
+        continue
+      fi
+      grep -q 'bullseye-backports' "${source_file}" && sudo rm -f "${source_file}"
+    fi
   done
   install_openhd_cloudsmith_key
 fi

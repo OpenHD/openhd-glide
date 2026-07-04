@@ -119,7 +119,21 @@ APT_SOURCES
     fi
   elif [[ "${DISTRO}" == "bullseye" ]]; then
     echo "[apt-preflight] Normalizing Bullseye apt sources..."
+    radxa_repo_suite="$(cat /opt/additionalFiles/radxa_repo_suite.txt 2>/dev/null || printf 'bullseye')"
+    if [[ "${radxa_repo_suite}" == "direct-bullseye" ]]; then
+      sudo rm -f \
+        /etc/apt/sources.list.d/radxa.list \
+        /etc/apt/sources.list.d/radxa-rockchip.list \
+        /etc/apt/sources.list.d/70-radxa-*.list
+    fi
     while IFS= read -r -d '' source_file; do
+      if [[ "${radxa_repo_suite}" == "direct-bullseye" ]] && grep -q 'radxa-repo.github.io' "${source_file}"; then
+        case "${source_file}" in
+          *.sources|/etc/apt/sources.list.d/*) sudo rm -f "${source_file}" ;;
+          *) sudo sed -i '\|radxa-repo.github.io|d' "${source_file}" ;;
+        esac
+        continue
+      fi
       if grep -q 'bullseye-backports' "${source_file}"; then
         case "${source_file}" in
           *.sources) sudo rm -f "${source_file}" ;;
@@ -219,17 +233,17 @@ APT_SOURCES
     if rock5_bookworm_marker not in packages_text:
         packages_text = packages_text.replace(
             "  normalize_bullseye_sources\n\n  if ! apt_update_tolerant; then",
-            f"  normalize_bullseye_sources\n  {rock5_bookworm_marker}\n  if [[ \"${{DISTRO}}\" == \"bookworm\" ]]; then\n    openhd_glide_normalize_apt_sources\n  fi\n\n  if ! apt_update_tolerant; then",
+            f"  normalize_bullseye_sources\n  {rock5_bookworm_marker}\n  radxa_repo_suite=\"$(cat /opt/additionalFiles/radxa_repo_suite.txt 2>/dev/null || printf 'bullseye')\"\n  if [[ \"${{DISTRO}}\" == \"bookworm\" || \"${{radxa_repo_suite}}\" == \"direct-bullseye\" ]]; then\n    openhd_glide_normalize_apt_sources\n  fi\n\n  if ! apt_update_tolerant; then",
             1,
         )
         packages_text = packages_text.replace(
             "    disable_backports_everywhere\n    if ! apt_update_tolerant; then",
-            "    disable_backports_everywhere\n    if [[ \"${DISTRO}\" == \"bookworm\" ]]; then\n      openhd_glide_normalize_apt_sources\n    fi\n    if ! apt_update_tolerant; then",
+            "    disable_backports_everywhere\n    if [[ \"${DISTRO}\" == \"bookworm\" || \"${radxa_repo_suite}\" == \"direct-bullseye\" ]]; then\n      openhd_glide_normalize_apt_sources\n    fi\n    if ! apt_update_tolerant; then",
             1,
         )
         packages_text = packages_text.replace(
             "      disable_security_everywhere\n      apt_update_tolerant || {",
-            "      disable_security_everywhere\n      if [[ \"${DISTRO}\" == \"bookworm\" ]]; then\n        openhd_glide_normalize_apt_sources\n      fi\n      apt_update_tolerant || {",
+            "      disable_security_everywhere\n      if [[ \"${DISTRO}\" == \"bookworm\" || \"${radxa_repo_suite}\" == \"direct-bullseye\" ]]; then\n        openhd_glide_normalize_apt_sources\n      fi\n      apt_update_tolerant || {",
             1,
         )
         if rock5_bookworm_marker not in packages_text:

@@ -67,16 +67,16 @@ jobs:
             package_suffix: rock5a
             package_arch: arm64
             cloudsmith_distro: debian
-            release: bookworm
-            radxa_repo_suite: rk3588-bookworm
+            release: bullseye
+            radxa_repo_suite: direct-bullseye
             require_rkmpp: "1"
             extra_debian_depends: "gstreamer1.0-tools, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad, gstreamer1.0-plugins-ugly, gstreamer1.0-libav, gstreamer1.0-rockchip1, librockchip-mpp1, librga2"
           - image_type: rock5b
             package_suffix: rock5b
             package_arch: arm64
             cloudsmith_distro: debian
-            release: bookworm
-            radxa_repo_suite: rk3588-bookworm
+            release: bullseye
+            radxa_repo_suite: direct-bullseye
             require_rkmpp: "1"
             extra_debian_depends: "gstreamer1.0-tools, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad, gstreamer1.0-plugins-ugly, gstreamer1.0-libav, gstreamer1.0-rockchip1, librockchip-mpp1, librga2"
           - image_type: radxa-cm5
