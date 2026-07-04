@@ -17,6 +17,13 @@ fi
 
 target_release="$(cat flavor.txt 2>/dev/null || true)"
 radxa_repo_suite="$(cat radxa_repo_suite.txt 2>/dev/null || printf '%s' "${target_release}")"
+package_suffix_early="$(cat package_suffix.txt 2>/dev/null || true)"
+is_rk3588_build() {
+  case "${package_suffix_early}:${radxa_repo_suite}" in
+    rock5a:*|rock5b:*|radxa-cm5:*|*:rk3588-bookworm|*:rk3588s2-bookworm) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 install_openhd_cloudsmith_key() {
   mkdir -p /etc/apt/trusted.gpg.d /usr/share/keyrings
   key_tmp="$(mktemp)"
@@ -137,13 +144,23 @@ elif [ "${target_release}" = "bullseye" ]; then
 fi
 
 apt-get update --fix-missing
-package_suffix_early="$(cat package_suffix.txt 2>/dev/null || true)"
-is_rk3588_build() {
-  case "${package_suffix_early}:${radxa_repo_suite}" in
-    rock5a:*|rock5b:*|radxa-cm5:*|*:rk3588-bookworm|*:rk3588s2-bookworm) return 0 ;;
-    *) return 1 ;;
-  esac
+clean_rk3588_broken_graphics_dev_state() {
+  if ! is_rk3588_build; then
+    return 0
+  fi
+  dpkg --remove --force-depends \
+    libdrm-dev \
+    libgbm-dev \
+    libglvnd-dev \
+    libegl-dev \
+    libgles-dev \
+    libgles2-mesa-dev \
+    libegl1-mesa-dev \
+    libgl-dev \
+    libglx-dev \
+    2>/dev/null || true
 }
+clean_rk3588_broken_graphics_dev_state
 drop_rockchip_task_meta_for_build_deps() {
   if ! is_rk3588_build; then
     return 0
@@ -183,7 +200,11 @@ else
   apt-get install -y --no-install-recommends libgles-dev libegl-dev
 fi
 
-apt-get remove -y gstreamer1.0-plugins-rtp || true
+if is_rk3588_build; then
+  dpkg --remove --force-depends gstreamer1.0-plugins-rtp 2>/dev/null || true
+else
+  apt-get remove -y gstreamer1.0-plugins-rtp || true
+fi
 
 install_exact_runtime_for_dev_package() {
   local dev_package="$1"
