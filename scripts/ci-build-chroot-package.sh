@@ -145,17 +145,36 @@ drop_rockchip_task_meta_for_build_deps() {
   esac
 }
 drop_rockchip_task_meta_for_build_deps
+extract_dev_deb_without_runtime_changes() {
+  local package_name="$1"
+  local deb_dir="/tmp/openhd-glide-dev-debs"
+  mkdir -p "${deb_dir}"
+  (
+    cd "${deb_dir}"
+    rm -f "${package_name}"_*.deb
+    apt-get download "${package_name}"
+    dpkg-deb -x "${package_name}"_*.deb /
+  )
+}
 graphics_dev_packages=(
   libdrm-dev
   libgbm-dev
-  libgles-dev
-  libegl-dev
 )
 if apt-cache policy libdrm2 libgbm1 | awk '/Installed:|Candidate:/ && /~bpo/ { found = 1 } END { exit(found ? 0 : 1) }'; then
   apt-get install -y --no-install-recommends -t bookworm-backports "${graphics_dev_packages[@]}"
 else
   apt-get install -y --no-install-recommends "${graphics_dev_packages[@]}"
 fi
+case "${package_suffix_early}:${radxa_repo_suite}" in
+  rock5a:*|rock5b:*|radxa-cm5:*|*:rk3588-bookworm|*:rk3588s2-bookworm)
+    for package_name in libglvnd-dev libegl-dev libgles-dev; do
+      extract_dev_deb_without_runtime_changes "${package_name}"
+    done
+    ;;
+  *)
+    apt-get install -y --no-install-recommends libgles-dev libegl-dev
+    ;;
+esac
 
 apt-get remove -y gstreamer1.0-plugins-rtp || true
 
