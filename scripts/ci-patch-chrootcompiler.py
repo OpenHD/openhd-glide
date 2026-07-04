@@ -98,6 +98,9 @@ openhd_glide_normalize_apt_sources() {
         -e 's|https?://archive\.debian\.org/debian|http://deb.debian.org/debian|g' \
         -e 's|https?://archive\.debian\.org/debian-security|http://security.debian.org/debian-security|g' \
         -e '\|radxa-repo.github.io|d' \
+        -e '\|oibaf|d' \
+        -e '\|ppa.launchpadcontent.net|d' \
+        -e '\|launchpad.net|d' \
         -e '\|deb\.debian\.org/debian[[:space:]]+rk[0-9a-z-]*-bookworm|d' \
         -e '\|deb\.debian\.org/debian[[:space:]]+bullseye|d' \
         -e '\|security\.debian\.org/debian-security[[:space:]]+bullseye-security|d' \
@@ -114,6 +117,12 @@ deb http://deb.debian.org/debian bookworm-backports main contrib non-free non-fr
 deb http://security.debian.org/debian-security bookworm-security main contrib non-free non-free-firmware
 APT_SOURCES
     fi
+    sudo mkdir -p /etc/apt/preferences.d
+    sudo tee /etc/apt/preferences.d/99openhd-ci-no-oibaf >/dev/null <<'APT_PREFS'
+Package: *
+Pin: version *oibaf*
+Pin-Priority: -1
+APT_PREFS
   elif [[ "${DISTRO}" == "bullseye" ]]; then
     echo "[apt-preflight] Normalizing Bullseye apt sources..."
     while IFS= read -r -d '' source_file; do

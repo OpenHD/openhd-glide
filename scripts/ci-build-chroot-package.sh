@@ -84,6 +84,9 @@ if [ "${target_release}" = "bookworm" ]; then
         -e 's|https?://archive\.debian\.org/debian|http://deb.debian.org/debian|g' \
         -e 's|https?://archive\.debian\.org/debian-security|http://security.debian.org/debian-security|g' \
         -e '\|radxa-repo.github.io|d' \
+        -e '\|oibaf|d' \
+        -e '\|ppa.launchpadcontent.net|d' \
+        -e '\|launchpad.net|d' \
         -e '\|deb\.debian\.org/debian[[:space:]]+rk[0-9a-z-]*-bookworm|d' \
         -e '\|deb\.debian\.org/debian[[:space:]]+bullseye|d' \
         -e '\|security\.debian\.org/debian-security[[:space:]]+bullseye-security|d' \
@@ -103,6 +106,9 @@ if [ "${target_release}" = "bookworm" ]; then
       sudo sed -i -E \
         -e 's|https?://archive\.debian\.org/debian|http://deb.debian.org/debian|g' \
         -e 's|https?://archive\.debian\.org/debian-security|http://security.debian.org/debian-security|g' \
+        -e '\|oibaf|d' \
+        -e '\|ppa.launchpadcontent.net|d' \
+        -e '\|launchpad.net|d' \
         -e '\|deb\.debian\.org/debian[[:space:]]+rk[0-9a-z-]*-bookworm|d' \
         -e '\|deb\.debian\.org/debian[[:space:]]+bullseye|d' \
         -e '\|security\.debian\.org/debian-security[[:space:]]+bullseye-security|d' \
@@ -120,6 +126,12 @@ deb http://deb.debian.org/debian bookworm-backports main contrib non-free non-fr
 deb http://security.debian.org/debian-security bookworm-security main contrib non-free non-free-firmware
 APT_SOURCES
   fi
+  mkdir -p /etc/apt/preferences.d
+  cat >/etc/apt/preferences.d/99openhd-ci-no-oibaf <<'APT_PREFS'
+Package: *
+Pin: version *oibaf*
+Pin-Priority: -1
+APT_PREFS
 elif [ "${target_release}" = "bullseye" ]; then
   for source_file in /etc/apt/sources.list /etc/apt/sources.list.d/*.list; do
     [ -f "${source_file}" ] && sudo sed -i '\|bullseye-backports|d' "${source_file}"
@@ -132,17 +144,22 @@ fi
 
 apt-get update --fix-missing
 package_suffix_early="$(cat package_suffix.txt 2>/dev/null || true)"
-drop_rockchip_task_meta_for_build_deps() {
+is_rk3588_build() {
   case "${package_suffix_early}:${radxa_repo_suite}" in
-    rock5a:*|rock5b:*|radxa-cm5:*|*:rk3588-bookworm|*:rk3588s2-bookworm)
-      apt-mark unhold task-rockchip task-rockchip-drm task-rockchip-gstreamer task-rockchip-xorg 2>/dev/null || true
-      apt-get remove -y --no-install-recommends \
-        task-rockchip \
-        task-rockchip-drm \
-        task-rockchip-gstreamer \
-        task-rockchip-xorg || true
-      ;;
+    rock5a:*|rock5b:*|radxa-cm5:*|*:rk3588-bookworm|*:rk3588s2-bookworm) return 0 ;;
+    *) return 1 ;;
   esac
+}
+drop_rockchip_task_meta_for_build_deps() {
+  if ! is_rk3588_build; then
+    return 0
+  fi
+  apt-mark unhold task-rockchip task-rockchip-drm task-rockchip-gstreamer task-rockchip-xorg 2>/dev/null || true
+  apt-get remove -y --no-install-recommends \
+    task-rockchip \
+    task-rockchip-drm \
+    task-rockchip-gstreamer \
+    task-rockchip-xorg || true
 }
 drop_rockchip_task_meta_for_build_deps
 extract_dev_deb_without_runtime_changes() {
@@ -152,7 +169,11 @@ extract_dev_deb_without_runtime_changes() {
   (
     cd "${deb_dir}"
     rm -f "${package_name}"_*.deb
-    apt-get download "${package_name}"
+    if [ "${target_release}" = "bookworm" ]; then
+      apt-get -t bookworm download "${package_name}"
+    else
+      apt-get download "${package_name}"
+    fi
     dpkg-deb -x "${package_name}"_*.deb /
   )
 }
@@ -160,21 +181,18 @@ graphics_dev_packages=(
   libdrm-dev
   libgbm-dev
 )
-if apt-cache policy libdrm2 libgbm1 | awk '/Installed:|Candidate:/ && /~bpo/ { found = 1 } END { exit(found ? 0 : 1) }'; then
-  apt-get install -y --no-install-recommends -t bookworm-backports "${graphics_dev_packages[@]}"
+if is_rk3588_build; then
+  for package_name in libdrm-dev libgbm-dev libglvnd-dev libegl-dev libgles-dev; do
+    extract_dev_deb_without_runtime_changes "${package_name}"
+  done
 else
-  apt-get install -y --no-install-recommends "${graphics_dev_packages[@]}"
+  if apt-cache policy libdrm2 libgbm1 | awk '/Installed:|Candidate:/ && /~bpo/ { found = 1 } END { exit(found ? 0 : 1) }'; then
+    apt-get install -y --no-install-recommends -t bookworm-backports "${graphics_dev_packages[@]}"
+  else
+    apt-get install -y --no-install-recommends "${graphics_dev_packages[@]}"
+  fi
+  apt-get install -y --no-install-recommends libgles-dev libegl-dev
 fi
-case "${package_suffix_early}:${radxa_repo_suite}" in
-  rock5a:*|rock5b:*|radxa-cm5:*|*:rk3588-bookworm|*:rk3588s2-bookworm)
-    for package_name in libglvnd-dev libegl-dev libgles-dev; do
-      extract_dev_deb_without_runtime_changes "${package_name}"
-    done
-    ;;
-  *)
-    apt-get install -y --no-install-recommends libgles-dev libegl-dev
-    ;;
-esac
 
 apt-get remove -y gstreamer1.0-plugins-rtp || true
 
