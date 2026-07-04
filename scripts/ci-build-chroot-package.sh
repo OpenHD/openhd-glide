@@ -131,11 +131,25 @@ elif [ "${target_release}" = "bullseye" ]; then
 fi
 
 apt-get update --fix-missing
+package_suffix_early="$(cat package_suffix.txt 2>/dev/null || true)"
+drop_rockchip_task_meta_for_build_deps() {
+  case "${package_suffix_early}:${radxa_repo_suite}" in
+    rock5a:*|rock5b:*|radxa-cm5:*|*:rk3588-bookworm|*:rk3588s2-bookworm)
+      apt-mark unhold task-rockchip task-rockchip-drm task-rockchip-gstreamer task-rockchip-xorg 2>/dev/null || true
+      apt-get remove -y --no-install-recommends \
+        task-rockchip \
+        task-rockchip-drm \
+        task-rockchip-gstreamer \
+        task-rockchip-xorg || true
+      ;;
+  esac
+}
+drop_rockchip_task_meta_for_build_deps
 graphics_dev_packages=(
   libdrm-dev
   libgbm-dev
-  libgles2-mesa-dev
-  libegl1-mesa-dev
+  libgles-dev
+  libegl-dev
 )
 if apt-cache policy libdrm2 libgbm1 | awk '/Installed:|Candidate:/ && /~bpo/ { found = 1 } END { exit(found ? 0 : 1) }'; then
   apt-get install -y --no-install-recommends -t bookworm-backports "${graphics_dev_packages[@]}"
