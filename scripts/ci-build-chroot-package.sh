@@ -170,6 +170,7 @@ apt_package_available() {
 
 install_radxa_bullseye_rkmpp_debs() {
   local deb_dir="/tmp/radxa-rkmpp-debs"
+  local mpp_dev_deb="${deb_dir}/librockchip-mpp-dev_1.5.0-1_arm64.deb"
   rm -rf "${deb_dir}"
   mkdir -p "${deb_dir}"
   download_deb() {
@@ -191,7 +192,20 @@ install_radxa_bullseye_rkmpp_debs() {
   download_deb "https://radxa-repo.github.io/bullseye/pool/main/libr/librga/librga2_2.2.0-1_arm64.deb"
   download_deb "https://radxa-repo.github.io/bullseye/pool/main/libr/librga/librga-dev_2.2.0-1_arm64.deb"
   download_deb "https://radxa-repo.github.io/bullseye/pool/main/g/gstreamer1.0-rockchip/gstreamer1.0-rockchip1_1.14-4_arm64.deb"
+  if [ -e /usr/include/rockchip/rk_mpi.h ]; then
+    rm -f "${mpp_dev_deb}"
+  elif dpkg -S /usr/lib/aarch64-linux-gnu/pkgconfig/rockchip_mpp.pc >/dev/null 2>&1; then
+    rm -rf /tmp/radxa-mpp-dev-extract
+    dpkg-deb -x "${mpp_dev_deb}" /tmp/radxa-mpp-dev-extract
+    mkdir -p /usr/include/rockchip
+    cp -a /tmp/radxa-mpp-dev-extract/usr/include/rockchip/. /usr/include/rockchip/
+    rm -f "${mpp_dev_deb}"
+  fi
   apt-get install -y --no-install-recommends "${deb_dir}"/*.deb
+  if [ ! -e /usr/include/rockchip/rk_mpi.h ]; then
+    echo "[openhd-glide-ci] RKMPP header is missing after installing Radxa packages: /usr/include/rockchip/rk_mpi.h" >&2
+    exit 1
+  fi
 }
 
 apt-get install -y --no-install-recommends \
