@@ -176,17 +176,21 @@ openhd_glide_normalize_apt_sources
   {radxa_cm3_marker}
   sudo apt-key del E572249A33EB9743 5D93177D0752732A >/dev/null 2>&1 || true
   radxa_repo_suite="$(cat /opt/additionalFiles/radxa_repo_suite.txt 2>/dev/null || printf 'bullseye')"
-  if [[ "${{radxa_repo_suite}}" == "bullseye" ]]; then
+  if [[ "${{radxa_repo_suite}}" == "direct-bullseye" ]]; then
+    sudo rm -f /etc/apt/sources.list.d/radxa.list /etc/apt/sources.list.d/70-radxa-*.list /etc/apt/sources.list.d/radxa-rockchip.list
+    openhd_glide_normalize_apt_sources
+  elif [[ "${{radxa_repo_suite}}" == "bullseye" ]]; then
     wget -qO - https://radxa-repo.github.io/bullseye/public.key | sudo tee /usr/share/keyrings/radxa-apt-keyring.gpg >/dev/null
     echo "deb [signed-by=/usr/share/keyrings/radxa-apt-keyring.gpg] https://radxa-repo.github.io/bullseye bullseye main" | sudo tee /etc/apt/sources.list.d/radxa.list
+    sudo apt-get update
   else
     install_radxa_archive_keyring
     sudo rm -f /etc/apt/sources.list.d/radxa.list
     sudo tee "/etc/apt/sources.list.d/70-radxa-${{radxa_repo_suite}}.list" >/dev/null <<APT_SOURCES
 deb [signed-by=/usr/share/keyrings/radxa-archive-keyring.gpg] https://radxa-repo.github.io/${{radxa_repo_suite}}/ ${{radxa_repo_suite}} main
 APT_SOURCES
+    sudo apt-get update
   fi
-  sudo apt-get update
 """
     if radxa_cm3_marker not in packages_text:
         if radxa_cm3_old not in packages_text:

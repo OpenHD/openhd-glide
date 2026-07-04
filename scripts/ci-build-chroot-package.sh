@@ -168,6 +168,32 @@ apt_package_available() {
   [ -n "${candidate}" ] && [ "${candidate}" != "(none)" ]
 }
 
+install_radxa_bullseye_rkmpp_debs() {
+  local deb_dir="/tmp/radxa-rkmpp-debs"
+  rm -rf "${deb_dir}"
+  mkdir -p "${deb_dir}"
+  download_deb() {
+    local url="$1"
+    local output="${deb_dir}/${url##*/}"
+    if command -v curl >/dev/null 2>&1; then
+      curl -1fsSL "${url}" -o "${output}"
+    elif command -v wget >/dev/null 2>&1; then
+      wget -qO "${output}" "${url}"
+    else
+      echo "curl or wget is required to download Radxa RKMPP packages" >&2
+      return 1
+    fi
+  }
+
+  download_deb "https://radxa-repo.github.io/bullseye/pool/main/m/mpp/librockchip-mpp1_1.5.0-1_arm64.deb"
+  download_deb "https://radxa-repo.github.io/bullseye/pool/main/m/mpp/librockchip-vpu0_1.5.0-1_arm64.deb"
+  download_deb "https://radxa-repo.github.io/bullseye/pool/main/m/mpp/librockchip-mpp-dev_1.5.0-1_arm64.deb"
+  download_deb "https://radxa-repo.github.io/bullseye/pool/main/libr/librga/librga2_2.2.0-1_arm64.deb"
+  download_deb "https://radxa-repo.github.io/bullseye/pool/main/libr/librga/librga-dev_2.2.0-1_arm64.deb"
+  download_deb "https://radxa-repo.github.io/bullseye/pool/main/g/gstreamer1.0-rockchip/gstreamer1.0-rockchip1_1.14-4_arm64.deb"
+  apt-get install -y --no-install-recommends "${deb_dir}"/*.deb
+}
+
 apt-get install -y --no-install-recommends \
   build-essential \
   ca-certificates \
@@ -187,13 +213,17 @@ apt-get install -y --no-install-recommends \
 
 require_rkmpp="$(cat require_rkmpp.txt)"
 if [ "${require_rkmpp}" = "1" ]; then
-  for package_name in librockchip-mpp-dev librga-dev gstreamer1.0-rockchip1; do
-    if ! apt_package_available "${package_name}"; then
-      echo "[openhd-glide-ci] RKMPP is required, but ${package_name} is unavailable. Check that the Radxa repository is enabled." >&2
-      exit 1
-    fi
-  done
-  apt-get install -y --no-install-recommends librockchip-mpp-dev librga-dev gstreamer1.0-rockchip1
+  if [ "${target_release}" = "bullseye" ]; then
+    install_radxa_bullseye_rkmpp_debs
+  else
+    for package_name in librockchip-mpp-dev librga-dev gstreamer1.0-rockchip1; do
+      if ! apt_package_available "${package_name}"; then
+        echo "[openhd-glide-ci] RKMPP is required, but ${package_name} is unavailable. Check that the Radxa repository is enabled." >&2
+        exit 1
+      fi
+    done
+    apt-get install -y --no-install-recommends librockchip-mpp-dev librga-dev gstreamer1.0-rockchip1
+  fi
 fi
 
 apt-get install -y --no-install-recommends cmake || true
