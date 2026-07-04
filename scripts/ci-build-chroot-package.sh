@@ -168,6 +168,9 @@ clean_rk3588_broken_graphics_dev_state() {
   if ! is_rk3588_build; then
     return 0
   fi
+  if [ "${target_release}" != "bookworm" ]; then
+    return 0
+  fi
   dpkg --remove --force-depends \
     libdrm-dev \
     libgbm-dev \
@@ -206,8 +209,11 @@ extract_dev_deb_without_runtime_changes() {
 graphics_dev_packages=(
   libdrm-dev
   libgbm-dev
+  libgl-dev
+  libegl-dev
+  libgles-dev
 )
-if is_rk3588_build; then
+if is_rk3588_build && [ "${target_release}" = "bookworm" ]; then
   for package_name in libdrm-dev libgbm-dev libglvnd-dev libegl-dev libgles-dev; do
     extract_dev_deb_without_runtime_changes "${package_name}"
   done
@@ -217,7 +223,6 @@ else
   else
     apt-get install -y --no-install-recommends "${graphics_dev_packages[@]}"
   fi
-  apt-get install -y --no-install-recommends libgles-dev libegl-dev
 fi
 
 if is_rk3588_build; then
