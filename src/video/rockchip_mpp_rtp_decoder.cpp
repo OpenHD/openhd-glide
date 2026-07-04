@@ -694,7 +694,11 @@ bool RockchipMppRtpDecoder::frame_to_dmabuf(void* frame_ptr, glide::dev::DmabufV
     const auto fmt = mpp_frame_get_fmt(frame);
     const auto base_fmt = static_cast<MppFrameFormat>(fmt & MPP_FRAME_FMT_MASK);
     const auto fbc = static_cast<std::uint32_t>(fmt & MPP_FRAME_FBC_MASK);
+#ifdef MPP_FRAME_TILE_FLAG
     const auto tiled = (fmt & MPP_FRAME_TILE_FLAG) != 0;
+#else
+    const auto tiled = false;
+#endif
     const auto buffer_size = static_cast<std::uint64_t>(mpp_frame_get_buf_size(frame));
     if (width == 0 || height == 0 || hstride == 0 || vstride == 0) {
         last_error_ = "MPP decoded frame has invalid dimensions";
