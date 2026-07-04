@@ -117,12 +117,6 @@ deb http://deb.debian.org/debian bookworm-backports main contrib non-free non-fr
 deb http://security.debian.org/debian-security bookworm-security main contrib non-free non-free-firmware
 APT_SOURCES
     fi
-    sudo mkdir -p /etc/apt/preferences.d
-    sudo tee /etc/apt/preferences.d/99openhd-ci-no-oibaf >/dev/null <<'APT_PREFS'
-Package: *
-Pin: version *oibaf*
-Pin-Priority: -1
-APT_PREFS
   elif [[ "${DISTRO}" == "bullseye" ]]; then
     echo "[apt-preflight] Normalizing Bullseye apt sources..."
     while IFS= read -r -d '' source_file; do

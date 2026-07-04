@@ -126,12 +126,6 @@ deb http://deb.debian.org/debian bookworm-backports main contrib non-free non-fr
 deb http://security.debian.org/debian-security bookworm-security main contrib non-free non-free-firmware
 APT_SOURCES
   fi
-  mkdir -p /etc/apt/preferences.d
-  cat >/etc/apt/preferences.d/99openhd-ci-no-oibaf <<'APT_PREFS'
-Package: *
-Pin: version *oibaf*
-Pin-Priority: -1
-APT_PREFS
 elif [ "${target_release}" = "bullseye" ]; then
   for source_file in /etc/apt/sources.list /etc/apt/sources.list.d/*.list; do
     [ -f "${source_file}" ] && sudo sed -i '\|bullseye-backports|d' "${source_file}"
@@ -155,11 +149,6 @@ drop_rockchip_task_meta_for_build_deps() {
     return 0
   fi
   apt-mark unhold task-rockchip task-rockchip-drm task-rockchip-gstreamer task-rockchip-xorg 2>/dev/null || true
-  apt-get remove -y --no-install-recommends \
-    task-rockchip \
-    task-rockchip-drm \
-    task-rockchip-gstreamer \
-    task-rockchip-xorg || true
 }
 drop_rockchip_task_meta_for_build_deps
 extract_dev_deb_without_runtime_changes() {
