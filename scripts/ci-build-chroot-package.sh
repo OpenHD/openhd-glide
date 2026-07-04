@@ -67,51 +67,46 @@ install_radxa_archive_keyring() {
 install_radxa_archive_keyring
 
 if [ "${target_release}" = "bookworm" ]; then
-  rm -f /etc/apt/sources.list.d/openhd-bookworm.list
+  rm -f \
+    /etc/apt/sources.list.d/radxa.list \
+    /etc/apt/sources.list.d/radxa-rockchip.list \
+    /etc/apt/sources.list.d/70-radxa-*.list \
+    /etc/apt/sources.list.d/openhd-bookworm.list
   for source_file in /etc/apt/sources.list /etc/apt/sources.list.d/*.list; do
     if [ -f "${source_file}" ]; then
+      if grep -q 'dl.cloudsmith.io/public/openhd/.*/deb/debian bullseye' "${source_file}"; then
+        case "${source_file}" in
+          /etc/apt/sources.list.d/*) rm -f "${source_file}"; continue ;;
+          *) sudo sed -i -E '\|dl.cloudsmith.io/public/openhd/.*/deb/debian[[:space:]]+bullseye|d' "${source_file}" ;;
+        esac
+      fi
       sudo sed -i -E \
         -e 's|https?://archive\.debian\.org/debian|http://deb.debian.org/debian|g' \
         -e 's|https?://archive\.debian\.org/debian-security|http://security.debian.org/debian-security|g' \
-        "${source_file}"
-    fi
-    if [ -f "${source_file}" ] && grep -q 'radxa-repo.github.io/bullseye' "${source_file}"; then
-      sudo sed -i -E \
-        -e "s|https://radxa-repo.github.io/bullseye/?|https://radxa-repo.github.io/${radxa_repo_suite}/|g" \
-        -e "s|http://radxa-repo.github.io/bullseye/?|https://radxa-repo.github.io/${radxa_repo_suite}/|g" \
-        -e "s|rockchip-bullseye|${radxa_repo_suite}|g" \
-        -e "s| bullseye | ${radxa_repo_suite} |g" \
-        "${source_file}"
-    fi
-    if [ -f "${source_file}" ] && grep -q 'radxa-repo.github.io/.*bookworm' "${source_file}"; then
-      sudo sed -i -E \
-        -e 's|\[signed-by=[^]]+\]|[signed-by=/usr/share/keyrings/radxa-archive-keyring.gpg]|g' \
-        -e '\|radxa-repo.github.io/.*bookworm|{ /\[signed-by=/! s|^deb |deb [signed-by=/usr/share/keyrings/radxa-archive-keyring.gpg] | }' \
+        -e '\|radxa-repo.github.io|d' \
+        -e '\|deb\.debian\.org/debian[[:space:]]+rk[0-9a-z-]*-bookworm|d' \
+        -e '\|deb\.debian\.org/debian[[:space:]]+bullseye|d' \
+        -e '\|security\.debian\.org/debian-security[[:space:]]+bullseye-security|d' \
         "${source_file}"
     fi
   done
   for source_file in /etc/apt/sources.list.d/*.sources; do
     if [ -f "${source_file}" ]; then
+      if grep -q 'radxa-repo.github.io' "${source_file}"; then
+        rm -f "${source_file}"
+        continue
+      fi
+      if grep -q 'dl.cloudsmith.io/public/openhd/.*/deb/debian' "${source_file}" && grep -q 'Suites: bullseye' "${source_file}"; then
+        rm -f "${source_file}"
+        continue
+      fi
       sudo sed -i -E \
         -e 's|https?://archive\.debian\.org/debian|http://deb.debian.org/debian|g' \
         -e 's|https?://archive\.debian\.org/debian-security|http://security.debian.org/debian-security|g' \
+        -e '\|deb\.debian\.org/debian[[:space:]]+rk[0-9a-z-]*-bookworm|d' \
+        -e '\|deb\.debian\.org/debian[[:space:]]+bullseye|d' \
+        -e '\|security\.debian\.org/debian-security[[:space:]]+bullseye-security|d' \
         "${source_file}"
-    fi
-    if [ -f "${source_file}" ] && grep -q 'radxa-repo.github.io/bullseye' "${source_file}"; then
-      sudo sed -i -E \
-        -e "s|https://radxa-repo.github.io/bullseye/?|https://radxa-repo.github.io/${radxa_repo_suite}/|g" \
-        -e "s|http://radxa-repo.github.io/bullseye/?|https://radxa-repo.github.io/${radxa_repo_suite}/|g" \
-        -e "s|rockchip-bullseye|${radxa_repo_suite}|g" \
-        -e "s|Suites: bullseye|Suites: ${radxa_repo_suite}|g" \
-        "${source_file}"
-    fi
-    if [ -f "${source_file}" ] && grep -q 'radxa-repo.github.io/.*bookworm' "${source_file}"; then
-      sudo sed -i -E \
-        -e 's|^Signed-By:.*$|Signed-By: /usr/share/keyrings/radxa-archive-keyring.gpg|g' \
-        "${source_file}"
-      if ! grep -q '^Signed-By:' "${source_file}"; then
-        printf '%s\n' 'Signed-By: /usr/share/keyrings/radxa-archive-keyring.gpg' | sudo tee -a "${source_file}" >/dev/null
-      fi
     fi
   done
   sudo tee /etc/apt/sources.list.d/70-radxa-${radxa_repo_suite}.list >/dev/null <<APT_SOURCES
