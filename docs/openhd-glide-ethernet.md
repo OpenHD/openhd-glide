@@ -67,4 +67,4 @@ tail -f /tmp/openhd-glide-ethernet-receive.log
 
 ## Notes
 
-For the current Raspberry Pi 5 to Radxa Zero 3 Ethernet setup, `720p 60 MJPEG quality 75` is the most stable tested mode. Higher MJPEG modes can saturate the path and cause RTP packet gaps.
+For the current Raspberry Pi 5 to Radxa Zero 3 Ethernet setup, `720p 120 MJPEG quality 65` is the most stable tested mode. Higher MJPEG modes can saturate the path and cause RTP packet gaps.
