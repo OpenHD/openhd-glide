@@ -65,12 +65,15 @@ private:
     bool update_x20_detection(const std::uint8_t* data, std::size_t size);
     bool inject_x20_header_if_needed();
     bool submit_packet(const std::uint8_t* data, std::size_t size, std::int64_t pts);
+    bool submit_mjpeg_task(const std::uint8_t* data, std::size_t size, std::int64_t pts);
     bool frame_to_dmabuf(void* frame, glide::dev::DmabufVideoFrame& out);
     void release_frame(void*& frame);
     void cleanup();
 
     void* ctx_ {};
     void* mpi_ {};
+    void* input_group_ {};
+    void* output_group_ {};
     int socket_fd_ { -1 };
     bool h265_ {};
     bool mjpeg_ {};
@@ -107,6 +110,8 @@ private:
     std::vector<std::uint8_t> access_unit_;
     bool have_access_unit_ {};
     std::uint32_t access_unit_timestamp_ {};
+    std::uint32_t mjpeg_width_ {};
+    std::uint32_t mjpeg_height_ {};
     std::string last_error_;
 };
 

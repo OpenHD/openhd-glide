@@ -212,6 +212,9 @@ void append_jpeg_header(
     std::uint16_t restart_interval)
 {
     append_marker(output, 0xd8);
+    append_marker(output, 0xe0);
+    append_u16(output, 16);
+    output.insert(output.end(), { 'J', 'F', 'I', 'F', 0x00, 0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00 });
     append_quant_header(output, luma, 0);
     append_quant_header(output, chroma, 1);
     if (restart_interval != 0) {
@@ -225,13 +228,13 @@ void append_jpeg_header(
     append_u16(output, height);
     append_u16(output, width);
     output.push_back(3);
-    output.push_back(0);
+    output.push_back(1);
     output.push_back(type == 0 ? 0x21 : 0x22);
     output.push_back(0);
-    output.push_back(1);
+    output.push_back(2);
     output.push_back(0x11);
     output.push_back(1);
-    output.push_back(2);
+    output.push_back(3);
     output.push_back(0x11);
     output.push_back(1);
     append_huffman_header(output, jpeg_huffman_luma_dc.data(), jpeg_huffman_luma_dc.size(), 0, 0);
@@ -241,11 +244,11 @@ void append_jpeg_header(
     append_marker(output, 0xda);
     append_u16(output, 12);
     output.push_back(3);
-    output.push_back(0);
-    output.push_back(0);
     output.push_back(1);
-    output.push_back(0x11);
+    output.push_back(0);
     output.push_back(2);
+    output.push_back(0x11);
+    output.push_back(3);
     output.push_back(0x11);
     output.push_back(0);
     output.push_back(63);
@@ -283,7 +286,9 @@ bool RockchipMppRtpDecoder::start(std::uint16_t udp_port, const std::string& cod
     }
     running_.store(true, std::memory_order_release);
     feed_thread_ = std::thread(&RockchipMppRtpDecoder::feed_loop, this);
-    frame_thread_ = std::thread(&RockchipMppRtpDecoder::frame_loop, this);
+    if (!mjpeg_) {
+        frame_thread_ = std::thread(&RockchipMppRtpDecoder::frame_loop, this);
+    }
     return true;
 #else
     (void)udp_port;
@@ -413,8 +418,9 @@ bool RockchipMppRtpDecoder::configure_mpp()
     RK_U32 on = 0xffff;
     if (mpi_ != nullptr && ctx_ != nullptr) {
         auto output_format = static_cast<MppFrameFormat>(MPP_FMT_YUV420SP);
+        RK_U32 parser_split = mjpeg_ ? on : off;
         as_mpi(mpi_)->control(as_ctx(ctx_), MPP_DEC_SET_OUTPUT_FORMAT, &output_format);
-        as_mpi(mpi_)->control(as_ctx(ctx_), MPP_DEC_SET_PARSER_SPLIT_MODE, &off);
+        as_mpi(mpi_)->control(as_ctx(ctx_), MPP_DEC_SET_PARSER_SPLIT_MODE, &parser_split);
         as_mpi(mpi_)->control(as_ctx(ctx_), MPP_DEC_SET_DISABLE_ERROR, &on);
         as_mpi(mpi_)->control(as_ctx(ctx_), MPP_DEC_SET_IMMEDIATE_OUT, &on);
         as_mpi(mpi_)->control(as_ctx(ctx_), MPP_DEC_SET_ENABLE_FAST_PLAY, &on);
@@ -703,6 +709,8 @@ bool RockchipMppRtpDecoder::append_mjpeg_payload(const std::uint8_t* payload, st
     if (!marker) {
         return true;
     }
+    mjpeg_width_ = width;
+    mjpeg_height_ = height;
     if (access_unit_.size() < 2 || access_unit_[access_unit_.size() - 2U] != 0xff || access_unit_[access_unit_.size() - 1U] != 0xd9) {
         access_unit_.push_back(0xff);
         access_unit_.push_back(0xd9);
@@ -853,6 +861,9 @@ void RockchipMppRtpDecoder::feed_loop()
             continue;
         }
         if (!handle_rtp_packet(packet, static_cast<std::size_t>(received))) {
+            if (last_error_.empty()) {
+                last_error_ = "native RKMPP RTP feed stopped after packet submit failure";
+            }
             running_.store(false, std::memory_order_release);
             break;
         }
@@ -864,8 +875,13 @@ bool RockchipMppRtpDecoder::submit_packet(const std::uint8_t* data, std::size_t 
     if (data == nullptr || size == 0 || mpi_ == nullptr || ctx_ == nullptr) {
         return false;
     }
+    if (mjpeg_) {
+        return submit_mjpeg_task(data, size, pts);
+    }
     MppPacket packet {};
+    MppBuffer input_buffer {};
     if (mpp_packet_init(&packet, const_cast<std::uint8_t*>(data), size) != MPP_OK) {
+        last_error_ = "failed to allocate RKMPP input packet";
         return false;
     }
     mpp_packet_set_pos(packet, const_cast<std::uint8_t*>(data));
@@ -887,14 +903,184 @@ bool RockchipMppRtpDecoder::submit_packet(const std::uint8_t* data, std::size_t 
         }
         const auto elapsed = std::chrono::steady_clock::now() - start;
         if (elapsed > std::chrono::milliseconds(100)) {
-            std::lock_guard lock(mutex_);
-            ++submit_stalls_;
+            {
+                std::lock_guard lock(mutex_);
+                ++submit_stalls_;
+            }
+            std::ostringstream error;
+            error << "RKMPP decode_put_packet stalled for 100ms"
+                  << " last_ret=" << static_cast<int>(ret)
+                  << " packet_size=" << size
+                  << " pts=" << pts
+                  << ' ' << stats();
+            last_error_ = error.str();
             break;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
     mpp_packet_deinit(&packet);
+    if (input_buffer != nullptr) {
+        mpp_buffer_put(input_buffer);
+    }
     return false;
+}
+
+bool RockchipMppRtpDecoder::submit_mjpeg_task(const std::uint8_t* data, std::size_t size, std::int64_t pts)
+{
+    if (mjpeg_width_ == 0 || mjpeg_height_ == 0) {
+        last_error_ = "RKMPP MJPEG dimensions are not known";
+        return false;
+    }
+    if (input_group_ == nullptr) {
+        MppBufferGroup group {};
+        auto ret = mpp_buffer_group_get_internal(&group, MPP_BUFFER_TYPE_DRM);
+        if (ret != MPP_OK) {
+            ret = mpp_buffer_group_get_internal(&group, MPP_BUFFER_TYPE_ION);
+        }
+        if (ret != MPP_OK) {
+            ret = mpp_buffer_group_get_internal(&group, MPP_BUFFER_TYPE_NORMAL);
+        }
+        if (ret != MPP_OK || group == nullptr) {
+            last_error_ = "failed to allocate RKMPP MJPEG input buffer group";
+            return false;
+        }
+        input_group_ = group;
+    }
+    if (output_group_ == nullptr) {
+        MppBufferGroup group {};
+        auto ret = mpp_buffer_group_get_internal(&group, MPP_BUFFER_TYPE_DRM);
+        if (ret != MPP_OK) {
+            ret = mpp_buffer_group_get_internal(&group, MPP_BUFFER_TYPE_ION);
+        }
+        if (ret != MPP_OK || group == nullptr) {
+            last_error_ = "failed to allocate RKMPP MJPEG output buffer group";
+            return false;
+        }
+        output_group_ = group;
+    }
+
+    MppBuffer input_buffer {};
+    auto* input_group = static_cast<MppBufferGroup>(input_group_);
+    if (mpp_buffer_get(input_group, &input_buffer, size) != MPP_OK || input_buffer == nullptr) {
+        last_error_ = "failed to allocate RKMPP MJPEG input buffer";
+        return false;
+    }
+    auto* input_ptr = mpp_buffer_get_ptr(input_buffer);
+    if (input_ptr == nullptr) {
+        last_error_ = "RKMPP MJPEG input buffer is not CPU-mappable";
+        mpp_buffer_put(input_buffer);
+        return false;
+    }
+    std::memcpy(input_ptr, data, size);
+
+    MppPacket packet {};
+    if (mpp_packet_init_with_buffer(&packet, input_buffer) != MPP_OK) {
+        last_error_ = "failed to allocate RKMPP MJPEG input packet";
+        mpp_buffer_put(input_buffer);
+        return false;
+    }
+    mpp_packet_set_pos(packet, input_ptr);
+    mpp_packet_set_length(packet, size);
+    mpp_packet_set_pts(packet, static_cast<RK_S64>(pts));
+
+    const auto hstride = (mjpeg_width_ + 15U) & ~15U;
+    const auto vstride = (mjpeg_height_ + 15U) & ~15U;
+    const auto output_size = static_cast<std::size_t>(hstride) * vstride * 4U;
+    MppBuffer output_buffer {};
+    auto* output_group = static_cast<MppBufferGroup>(output_group_);
+    if (mpp_buffer_get(output_group, &output_buffer, output_size) != MPP_OK || output_buffer == nullptr) {
+        last_error_ = "failed to allocate RKMPP MJPEG output buffer";
+        mpp_packet_deinit(&packet);
+        mpp_buffer_put(input_buffer);
+        return false;
+    }
+
+    MppFrame frame {};
+    if (mpp_frame_init(&frame) != MPP_OK || frame == nullptr) {
+        last_error_ = "failed to allocate RKMPP MJPEG output frame";
+        mpp_buffer_put(output_buffer);
+        mpp_packet_deinit(&packet);
+        mpp_buffer_put(input_buffer);
+        return false;
+    }
+    mpp_frame_set_width(frame, mjpeg_width_);
+    mpp_frame_set_height(frame, mjpeg_height_);
+    mpp_frame_set_hor_stride(frame, hstride);
+    mpp_frame_set_ver_stride(frame, vstride);
+    mpp_frame_set_fmt(frame, MPP_FMT_YUV420SP);
+    mpp_frame_set_buffer(frame, output_buffer);
+
+    MppTask task {};
+    auto ret = as_mpi(mpi_)->poll(as_ctx(ctx_), MPP_PORT_INPUT, MPP_POLL_BLOCK);
+    if (ret != MPP_OK) {
+        last_error_ = "RKMPP MJPEG input poll failed ret=" + std::to_string(static_cast<int>(ret));
+        release_frame(reinterpret_cast<void*&>(frame));
+        mpp_buffer_put(output_buffer);
+        mpp_packet_deinit(&packet);
+        mpp_buffer_put(input_buffer);
+        return false;
+    }
+    ret = as_mpi(mpi_)->dequeue(as_ctx(ctx_), MPP_PORT_INPUT, &task);
+    if (ret != MPP_OK || task == nullptr) {
+        last_error_ = "RKMPP MJPEG input dequeue failed ret=" + std::to_string(static_cast<int>(ret));
+        release_frame(reinterpret_cast<void*&>(frame));
+        mpp_buffer_put(output_buffer);
+        mpp_packet_deinit(&packet);
+        mpp_buffer_put(input_buffer);
+        return false;
+    }
+    mpp_task_meta_set_packet(task, KEY_INPUT_PACKET, packet);
+    mpp_task_meta_set_frame(task, KEY_OUTPUT_FRAME, frame);
+    ret = as_mpi(mpi_)->enqueue(as_ctx(ctx_), MPP_PORT_INPUT, task);
+    if (ret != MPP_OK) {
+        last_error_ = "RKMPP MJPEG input enqueue failed ret=" + std::to_string(static_cast<int>(ret));
+        release_frame(reinterpret_cast<void*&>(frame));
+        mpp_buffer_put(output_buffer);
+        mpp_packet_deinit(&packet);
+        mpp_buffer_put(input_buffer);
+        return false;
+    }
+
+    ret = as_mpi(mpi_)->poll(as_ctx(ctx_), MPP_PORT_OUTPUT, MPP_POLL_BLOCK);
+    if (ret != MPP_OK) {
+        last_error_ = "RKMPP MJPEG output poll failed ret=" + std::to_string(static_cast<int>(ret));
+        release_frame(reinterpret_cast<void*&>(frame));
+        mpp_buffer_put(output_buffer);
+        mpp_packet_deinit(&packet);
+        mpp_buffer_put(input_buffer);
+        return false;
+    }
+    task = nullptr;
+    ret = as_mpi(mpi_)->dequeue(as_ctx(ctx_), MPP_PORT_OUTPUT, &task);
+    if (ret != MPP_OK || task == nullptr) {
+        last_error_ = "RKMPP MJPEG output dequeue failed ret=" + std::to_string(static_cast<int>(ret));
+        release_frame(reinterpret_cast<void*&>(frame));
+        mpp_buffer_put(output_buffer);
+        mpp_packet_deinit(&packet);
+        mpp_buffer_put(input_buffer);
+        return false;
+    }
+    MppFrame output_frame {};
+    mpp_task_meta_get_frame(task, KEY_OUTPUT_FRAME, &output_frame);
+    as_mpi(mpi_)->enqueue(as_ctx(ctx_), MPP_PORT_OUTPUT, task);
+
+    {
+        std::lock_guard lock(mutex_);
+        while (ready_frames_.size() >= 4) {
+            auto dropped = ready_frames_.front();
+            ready_frames_.pop_front();
+            release_frame(dropped);
+            ++dropped_decoded_frames_;
+        }
+        ready_frames_.push_back(output_frame != nullptr ? output_frame : frame);
+        ++decoded_frames_;
+        ++parsed_units_;
+        ++submitted_packets_;
+    }
+    mpp_buffer_put(output_buffer);
+    mpp_packet_deinit(&packet);
+    mpp_buffer_put(input_buffer);
+    return true;
 }
 
 void RockchipMppRtpDecoder::frame_loop()
@@ -1040,6 +1226,11 @@ void RockchipMppRtpDecoder::cleanup()
     }
     release_frame(pending_presented_frame_);
     release_frame(current_frame_);
+    if (input_group_ != nullptr) {
+        auto* group = static_cast<MppBufferGroup>(input_group_);
+        mpp_buffer_group_put(group);
+        input_group_ = nullptr;
+    }
     if (socket_fd_ >= 0) {
         close(socket_fd_);
         socket_fd_ = -1;

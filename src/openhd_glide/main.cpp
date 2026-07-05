@@ -1757,6 +1757,7 @@ int run_kms_video_preview(const Options& options)
             double present_interval_min_ms { 1000000.0 };
             double present_interval_max_ms {};
             std::uint64_t present_intervals_since_log {};
+            auto last_waiting_log = std::chrono::steady_clock::now();
             int result {};
 
             glide::log(glide::LogLevel::info, "OpenHD-Glide", "RKMPP presenter thread owns decoder dequeue and KMS page-flip cadence");
@@ -1773,6 +1774,11 @@ int run_kms_video_preview(const Options& options)
                         result = 1;
                         stop_requested = 1;
                         break;
+                    }
+                    const auto now = std::chrono::steady_clock::now();
+                    if (now - last_waiting_log >= std::chrono::seconds(1)) {
+                        glide::log(glide::LogLevel::info, "OpenHD-Glide", "waiting for native RKMPP decoded frame " + rkmpp.stats());
+                        last_waiting_log = now;
                     }
                     std::this_thread::sleep_for(std::chrono::milliseconds(1));
                     continue;
