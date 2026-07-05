@@ -23,7 +23,7 @@
 namespace {
 
 struct Mode {
-    const char* label;
+    std::string label;
     int width;
     int height;
     int fps;
@@ -142,6 +142,28 @@ int prompt_index(int count, int default_index)
     return static_cast<int>(value - 1);
 }
 
+int prompt_int(const std::string& prompt, int default_value, int min_value, int max_value)
+{
+    std::cout << prompt << " [" << default_value << "]: ";
+    std::string line;
+    std::getline(std::cin, line);
+    if (line.empty()) {
+        return default_value;
+    }
+    char* end {};
+    const auto value = std::strtol(line.c_str(), &end, 10);
+    if (end == line.c_str()) {
+        return default_value;
+    }
+    if (value < min_value) {
+        return min_value;
+    }
+    if (value > max_value) {
+        return max_value;
+    }
+    return static_cast<int>(value);
+}
+
 std::string quote(const std::string& value)
 {
     std::string out = "'";
@@ -174,8 +196,8 @@ int receive()
     }
 
     std::cout << "Detected platform: " << platform << "\n";
-    std::cout << "Starting receiver on UDP/RTP MJPEG port " << video_port << "\n";
-    std::cout << "Discovery is advertised on UDP " << glide::net::discovery_port << "\n";
+    std::cout << "Receiver ready on UDP/RTP MJPEG port " << video_port << "\n";
+    std::cout << "Log: /tmp/openhd-glide-ethernet-receive.log\n";
 
     std::string command = "systemctl stop openhd-glide 2>/dev/null || true; pkill -INT -x openhd-glide 2>/dev/null || true; ";
     command += "sysctl -w net.core.rmem_max=33554432 net.core.rmem_default=33554432 net.core.netdev_max_backlog=5000 >/dev/null 2>&1 || true; ";
@@ -184,6 +206,7 @@ int receive()
     if (platform == "rockchip") {
         command += " --native-rkmpp-video";
     }
+    command += " > /tmp/openhd-glide-ethernet-receive.log 2>&1";
     return run_shell(command);
 }
 
@@ -201,7 +224,7 @@ int send()
     }
 
     std::cout << "Detected platform: " << platform << "\n";
-    std::cout << "Searching for OpenHD-Glide receivers on this subnet...\n";
+    std::cout << "Searching for receivers...\n";
     const auto peers = glide::net::scan_blocking(glide::net::discovery_port, video_port, std::chrono::milliseconds(3500));
     if (peers.empty()) {
         std::cerr << "No receivers found. Start `openhd-glide-ethernet -receive` on the display unit first.\n";
@@ -220,9 +243,18 @@ int send()
     for (std::size_t i = 0; i < modes.size(); ++i) {
         std::cout << "  " << (i + 1U) << ") " << modes[i].label << "\n";
     }
+    std::cout << "  " << (modes.size() + 1U) << ") Custom\n";
     std::cout << "Mode [1]: ";
-    const auto mode_index = prompt_index(static_cast<int>(modes.size()), 0);
-    const auto mode = modes[static_cast<std::size_t>(mode_index)];
+    const auto mode_index = prompt_index(static_cast<int>(modes.size() + 1U), 0);
+    Mode mode = mode_index == static_cast<int>(modes.size())
+        ? Mode { "custom", 1280, 720, 60, 75 }
+        : modes[static_cast<std::size_t>(mode_index)];
+    if (mode_index == static_cast<int>(modes.size())) {
+        mode.width = prompt_int("Width", mode.width, 160, 7680);
+        mode.height = prompt_int("Height", mode.height, 120, 4320);
+        mode.fps = prompt_int("FPS", mode.fps, 1, 240);
+        mode.quality = prompt_int("MJPEG quality", mode.quality, 1, 100);
+    }
 
     std::cout << "Streaming to " << target.address << ':' << target.video_port << "\n";
     std::cout << "Mode: " << mode.width << 'x' << mode.height << '@' << mode.fps << " quality=" << mode.quality << "\n";
@@ -235,11 +267,11 @@ int send()
         << " --height " << mode.height
         << " --framerate " << mode.fps
         << " --quality " << mode.quality
-        << " --output - --nopreview"
-        << " | gst-launch-1.0 -v fdsrc fd=0 do-timestamp=true ! jpegparse ! rtpjpegpay pt=96 mtu=1200 ! udpsink host="
+        << " --output - --nopreview 2>/tmp/openhd-glide-ethernet-camera.log"
+        << " | gst-launch-1.0 -q fdsrc fd=0 do-timestamp=true ! jpegparse ! rtpjpegpay pt=96 mtu=1200 ! udpsink host="
         << quote(target.address)
         << " port=" << target.video_port
-        << " sync=false async=false";
+        << " sync=false async=false 2>/tmp/openhd-glide-ethernet-gst.log";
     return run_shell(command.str());
 }
 
