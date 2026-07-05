@@ -286,9 +286,8 @@ bool RockchipMppRtpDecoder::start(std::uint16_t udp_port, const std::string& cod
     }
     running_.store(true, std::memory_order_release);
     feed_thread_ = std::thread(&RockchipMppRtpDecoder::feed_loop, this);
-    if (!mjpeg_) {
-        frame_thread_ = std::thread(&RockchipMppRtpDecoder::frame_loop, this);
-    }
+    frame_thread_ = mjpeg_ ? std::thread(&RockchipMppRtpDecoder::mjpeg_task_loop, this)
+                           : std::thread(&RockchipMppRtpDecoder::frame_loop, this);
     return true;
 #else
     (void)udp_port;
@@ -689,9 +688,14 @@ bool RockchipMppRtpDecoder::append_mjpeg_payload(const std::uint8_t* payload, st
     const auto* scan_data = payload + payload_offset;
     const auto scan_size = size - payload_offset;
     if (fragment_offset == 0) {
+        if (have_access_unit_ && !access_unit_.empty() && access_unit_timestamp_ != timestamp) {
+            queue_mjpeg_access_unit(mjpeg_width_, mjpeg_height_, access_unit_timestamp_);
+        }
         access_unit_.clear();
         access_unit_timestamp_ = timestamp;
         have_access_unit_ = true;
+        mjpeg_width_ = width;
+        mjpeg_height_ = height;
         if (scan_size >= 2 && scan_data[0] == 0xff && scan_data[1] == 0xd8) {
             access_unit_.insert(access_unit_.end(), scan_data, scan_data + scan_size);
         } else {
@@ -709,16 +713,32 @@ bool RockchipMppRtpDecoder::append_mjpeg_payload(const std::uint8_t* payload, st
     if (!marker) {
         return true;
     }
-    mjpeg_width_ = width;
-    mjpeg_height_ = height;
+    queue_mjpeg_access_unit(width, height, timestamp);
+    return true;
+}
+
+void RockchipMppRtpDecoder::queue_mjpeg_access_unit(std::uint32_t width, std::uint32_t height, std::int64_t pts)
+{
     if (access_unit_.size() < 2 || access_unit_[access_unit_.size() - 2U] != 0xff || access_unit_[access_unit_.size() - 1U] != 0xd9) {
         access_unit_.push_back(0xff);
         access_unit_.push_back(0xd9);
     }
-    const auto submitted = submit_packet(access_unit_.data(), access_unit_.size(), timestamp);
+    {
+        std::lock_guard lock(mutex_);
+        while (mjpeg_units_.size() >= 3) {
+            mjpeg_units_.pop_front();
+            ++dropped_decoded_frames_;
+        }
+        mjpeg_units_.push_back(MjpegAccessUnit {
+            .data = std::move(access_unit_),
+            .pts = pts,
+            .width = width,
+            .height = height,
+        });
+    }
+    mjpeg_units_available_.notify_one();
     access_unit_.clear();
     have_access_unit_ = false;
-    return submitted;
 }
 
 bool RockchipMppRtpDecoder::submit_nal(const std::uint8_t* data, std::size_t size, std::int64_t pts)
@@ -876,7 +896,7 @@ bool RockchipMppRtpDecoder::submit_packet(const std::uint8_t* data, std::size_t 
         return false;
     }
     if (mjpeg_) {
-        return submit_mjpeg_task(data, size, pts);
+        return false;
     }
     MppPacket packet {};
     MppBuffer input_buffer {};
@@ -925,9 +945,9 @@ bool RockchipMppRtpDecoder::submit_packet(const std::uint8_t* data, std::size_t 
     return false;
 }
 
-bool RockchipMppRtpDecoder::submit_mjpeg_task(const std::uint8_t* data, std::size_t size, std::int64_t pts)
+bool RockchipMppRtpDecoder::submit_mjpeg_task(const std::uint8_t* data, std::size_t size, std::int64_t pts, std::uint32_t width, std::uint32_t height)
 {
-    if (mjpeg_width_ == 0 || mjpeg_height_ == 0) {
+    if (width == 0 || height == 0) {
         last_error_ = "RKMPP MJPEG dimensions are not known";
         return false;
     }
@@ -983,8 +1003,8 @@ bool RockchipMppRtpDecoder::submit_mjpeg_task(const std::uint8_t* data, std::siz
     mpp_packet_set_length(packet, size);
     mpp_packet_set_pts(packet, static_cast<RK_S64>(pts));
 
-    const auto hstride = (mjpeg_width_ + 15U) & ~15U;
-    const auto vstride = (mjpeg_height_ + 15U) & ~15U;
+    const auto hstride = (width + 15U) & ~15U;
+    const auto vstride = (height + 15U) & ~15U;
     const auto output_size = static_cast<std::size_t>(hstride) * vstride * 4U;
     MppBuffer output_buffer {};
     auto* output_group = static_cast<MppBufferGroup>(output_group_);
@@ -1003,8 +1023,8 @@ bool RockchipMppRtpDecoder::submit_mjpeg_task(const std::uint8_t* data, std::siz
         mpp_buffer_put(input_buffer);
         return false;
     }
-    mpp_frame_set_width(frame, mjpeg_width_);
-    mpp_frame_set_height(frame, mjpeg_height_);
+    mpp_frame_set_width(frame, width);
+    mpp_frame_set_height(frame, height);
     mpp_frame_set_hor_stride(frame, hstride);
     mpp_frame_set_ver_stride(frame, vstride);
     mpp_frame_set_fmt(frame, MPP_FMT_YUV420SP);
@@ -1081,6 +1101,36 @@ bool RockchipMppRtpDecoder::submit_mjpeg_task(const std::uint8_t* data, std::siz
     mpp_packet_deinit(&packet);
     mpp_buffer_put(input_buffer);
     return true;
+}
+
+void RockchipMppRtpDecoder::mjpeg_task_loop()
+{
+    while (running_.load(std::memory_order_acquire)) {
+        MjpegAccessUnit unit;
+        {
+            std::unique_lock lock(mutex_);
+            mjpeg_units_available_.wait_for(lock, std::chrono::milliseconds(10), [&]() {
+                return !running_.load(std::memory_order_acquire) || !mjpeg_units_.empty();
+            });
+            if (!running_.load(std::memory_order_acquire)) {
+                break;
+            }
+            if (mjpeg_units_.empty()) {
+                continue;
+            }
+            while (mjpeg_units_.size() > 1) {
+                mjpeg_units_.pop_front();
+                ++dropped_decoded_frames_;
+            }
+            unit = std::move(mjpeg_units_.front());
+            mjpeg_units_.pop_front();
+        }
+        if (!submit_mjpeg_task(unit.data.data(), unit.data.size(), unit.pts, unit.width, unit.height)) {
+            running_.store(false, std::memory_order_release);
+            mjpeg_units_available_.notify_all();
+            break;
+        }
+    }
 }
 
 void RockchipMppRtpDecoder::frame_loop()
@@ -1208,6 +1258,7 @@ void RockchipMppRtpDecoder::cleanup()
 {
 #if OPENHD_GLIDE_HAS_RKMPP
     running_.store(false, std::memory_order_release);
+    mjpeg_units_available_.notify_all();
     if (socket_fd_ >= 0) {
         shutdown(socket_fd_, SHUT_RDWR);
     }
@@ -1223,6 +1274,7 @@ void RockchipMppRtpDecoder::cleanup()
             release_frame(frame);
         }
         ready_frames_.clear();
+        mjpeg_units_.clear();
     }
     release_frame(pending_presented_frame_);
     release_frame(current_frame_);

@@ -26,6 +26,7 @@
 #include "dev/kms_dmabuf_video_plane.hpp"
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <deque>
 #include <mutex>
@@ -59,13 +60,15 @@ private:
     bool append_h264_payload(const std::uint8_t* payload, std::size_t size, bool marker, std::uint16_t sequence, std::uint32_t timestamp);
     bool append_h265_payload(const std::uint8_t* payload, std::size_t size, bool marker, std::uint16_t sequence, std::uint32_t timestamp);
     bool append_mjpeg_payload(const std::uint8_t* payload, std::size_t size, bool marker, std::uint32_t timestamp);
+    void queue_mjpeg_access_unit(std::uint32_t width, std::uint32_t height, std::int64_t pts);
     bool submit_nal(const std::uint8_t* data, std::size_t size, std::int64_t pts);
     bool queue_nal(const std::uint8_t* data, std::size_t size, std::uint32_t timestamp);
     bool flush_access_unit();
     bool update_x20_detection(const std::uint8_t* data, std::size_t size);
     bool inject_x20_header_if_needed();
     bool submit_packet(const std::uint8_t* data, std::size_t size, std::int64_t pts);
-    bool submit_mjpeg_task(const std::uint8_t* data, std::size_t size, std::int64_t pts);
+    bool submit_mjpeg_task(const std::uint8_t* data, std::size_t size, std::int64_t pts, std::uint32_t width, std::uint32_t height);
+    void mjpeg_task_loop();
     bool frame_to_dmabuf(void* frame, glide::dev::DmabufVideoFrame& out);
     void release_frame(void*& frame);
     void cleanup();
@@ -80,8 +83,16 @@ private:
     std::thread feed_thread_;
     std::thread frame_thread_;
     std::atomic<bool> running_ {};
+    struct MjpegAccessUnit {
+        std::vector<std::uint8_t> data;
+        std::int64_t pts {};
+        std::uint32_t width {};
+        std::uint32_t height {};
+    };
     mutable std::mutex mutex_;
+    std::condition_variable mjpeg_units_available_;
     std::deque<void*> ready_frames_;
+    std::deque<MjpegAccessUnit> mjpeg_units_;
     void* current_frame_ {};
     void* pending_presented_frame_ {};
     std::uint64_t parsed_units_ {};

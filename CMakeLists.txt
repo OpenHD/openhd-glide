@@ -339,6 +339,7 @@ else()
     target_compile_definitions(glide-view PRIVATE OPENHD_GLIDE_HAS_GSTREAMER=0)
 endif()
 add_glide_executable(glide-send src/tools/glide_send.cpp)
+add_glide_executable(openhd-glide-ethernet src/tools/openhd_glide_ethernet.cpp)
 add_executable(glide-ui src/glide_ui/main.cpp)
 target_link_libraries(glide-ui PRIVATE glide_common lvgl)
 if(OPENHD_GLIDE_DEVICE_KMS)
@@ -390,6 +391,7 @@ install(
         glide-ui
         glide-minimap-demo
         glide-send
+        openhd-glide-ethernet
     RUNTIME DESTINATION bin
 )
 
