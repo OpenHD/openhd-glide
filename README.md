@@ -238,7 +238,8 @@ still use V4L2/DMABUF when the sender provides H.265 and the OS exposes the HEVC
 
 Example run scripts cover the current device modes. Each script takes the UDP video port as its first optional
 argument, defaulting to `5600`; GStreamer/view scripts usually default to H.264 and take `h264`, `h265`, or
-`mjpeg` as the second optional argument where supported. The Raspberry Pi video-only script defaults to MJPEG.
+`mjpeg` as the second optional argument where supported. The RKMPP scripts use native MPP decode for H.264, H.265,
+and MJPEG. The Raspberry Pi video-only script defaults to MJPEG.
 Set `GLIDE_WIDTH` and `GLIDE_HEIGHT` to override the default `1920x1080`.
 Device KMS scripts default to `GLIDE_DISPLAY_HZ=0`, which auto-selects the highest refresh mode exposed by the connected display. Set `GLIDE_DISPLAY_HZ` to a non-zero value to request a specific refresh rate.
 

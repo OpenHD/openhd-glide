@@ -58,6 +58,7 @@ private:
     bool handle_rtp_packet(const std::uint8_t* packet, std::size_t size);
     bool append_h264_payload(const std::uint8_t* payload, std::size_t size, bool marker, std::uint16_t sequence, std::uint32_t timestamp);
     bool append_h265_payload(const std::uint8_t* payload, std::size_t size, bool marker, std::uint16_t sequence, std::uint32_t timestamp);
+    bool append_mjpeg_payload(const std::uint8_t* payload, std::size_t size, bool marker, std::uint32_t timestamp);
     bool submit_nal(const std::uint8_t* data, std::size_t size, std::int64_t pts);
     bool queue_nal(const std::uint8_t* data, std::size_t size, std::uint32_t timestamp);
     bool flush_access_unit();
@@ -72,6 +73,7 @@ private:
     void* mpi_ {};
     int socket_fd_ { -1 };
     bool h265_ {};
+    bool mjpeg_ {};
     std::thread feed_thread_;
     std::thread frame_thread_;
     std::atomic<bool> running_ {};

@@ -69,10 +69,187 @@ MppFrame as_frame(void* frame)
 constexpr std::uint8_t start_code[] { 0x00, 0x00, 0x00, 0x01 };
 constexpr std::uint8_t x20_sps[] { 0x67, 0x4d, 0x00, 0x29, 0x96, 0x54, 0x02, 0x80, 0x2d, 0x88 };
 constexpr std::uint8_t x20_pps[] { 0x68, 0xee, 0x31, 0x12 };
+constexpr std::array<std::uint8_t, 64> jpeg_luma_quantizer {
+    16, 11, 10, 16, 24, 40, 51, 61,
+    12, 12, 14, 19, 26, 58, 60, 55,
+    14, 13, 16, 24, 40, 57, 69, 56,
+    14, 17, 22, 29, 51, 87, 80, 62,
+    18, 22, 37, 56, 68, 109, 103, 77,
+    24, 35, 55, 64, 81, 104, 113, 92,
+    49, 64, 78, 87, 103, 121, 120, 101,
+    72, 92, 95, 98, 112, 100, 103, 99,
+};
+constexpr std::array<std::uint8_t, 64> jpeg_chroma_quantizer {
+    17, 18, 24, 47, 99, 99, 99, 99,
+    18, 21, 26, 66, 99, 99, 99, 99,
+    24, 26, 56, 99, 99, 99, 99, 99,
+    47, 66, 99, 99, 99, 99, 99, 99,
+    99, 99, 99, 99, 99, 99, 99, 99,
+    99, 99, 99, 99, 99, 99, 99, 99,
+    99, 99, 99, 99, 99, 99, 99, 99,
+    99, 99, 99, 99, 99, 99, 99, 99,
+};
+constexpr std::array<std::uint8_t, 28> jpeg_huffman_luma_dc {
+    0x00, 0x01, 0x05, 0x01, 0x01, 0x01, 0x01, 0x01,
+    0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+    0x08, 0x09, 0x0a, 0x0b,
+};
+constexpr std::array<std::uint8_t, 28> jpeg_huffman_chroma_dc {
+    0x00, 0x03, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
+    0x01, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+    0x08, 0x09, 0x0a, 0x0b,
+};
+constexpr std::array<std::uint8_t, 178> jpeg_huffman_luma_ac {
+    0x00, 0x02, 0x01, 0x03, 0x03, 0x02, 0x04, 0x03,
+    0x05, 0x05, 0x04, 0x04, 0x00, 0x00, 0x01, 0x7d,
+    0x01, 0x02, 0x03, 0x00, 0x04, 0x11, 0x05, 0x12,
+    0x21, 0x31, 0x41, 0x06, 0x13, 0x51, 0x61, 0x07,
+    0x22, 0x71, 0x14, 0x32, 0x81, 0x91, 0xa1, 0x08,
+    0x23, 0x42, 0xb1, 0xc1, 0x15, 0x52, 0xd1, 0xf0,
+    0x24, 0x33, 0x62, 0x72, 0x82, 0x09, 0x0a, 0x16,
+    0x17, 0x18, 0x19, 0x1a, 0x25, 0x26, 0x27, 0x28,
+    0x29, 0x2a, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39,
+    0x3a, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49,
+    0x4a, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59,
+    0x5a, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69,
+    0x6a, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79,
+    0x7a, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89,
+    0x8a, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98,
+    0x99, 0x9a, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7,
+    0xa8, 0xa9, 0xaa, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6,
+    0xb7, 0xb8, 0xb9, 0xba, 0xc2, 0xc3, 0xc4, 0xc5,
+    0xc6, 0xc7, 0xc8, 0xc9, 0xca, 0xd2, 0xd3, 0xd4,
+    0xd5, 0xd6, 0xd7, 0xd8, 0xd9, 0xda, 0xe1, 0xe2,
+    0xe3, 0xe4, 0xe5, 0xe6, 0xe7, 0xe8, 0xe9, 0xea,
+    0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8,
+    0xf9, 0xfa,
+};
+constexpr std::array<std::uint8_t, 178> jpeg_huffman_chroma_ac {
+    0x00, 0x02, 0x01, 0x02, 0x04, 0x04, 0x03, 0x04,
+    0x07, 0x05, 0x04, 0x04, 0x00, 0x01, 0x02, 0x77,
+    0x00, 0x01, 0x02, 0x03, 0x11, 0x04, 0x05, 0x21,
+    0x31, 0x06, 0x12, 0x41, 0x51, 0x07, 0x61, 0x71,
+    0x13, 0x22, 0x32, 0x81, 0x08, 0x14, 0x42, 0x91,
+    0xa1, 0xb1, 0xc1, 0x09, 0x23, 0x33, 0x52, 0xf0,
+    0x15, 0x62, 0x72, 0xd1, 0x0a, 0x16, 0x24, 0x34,
+    0xe1, 0x25, 0xf1, 0x17, 0x18, 0x19, 0x1a, 0x26,
+    0x27, 0x28, 0x29, 0x2a, 0x35, 0x36, 0x37, 0x38,
+    0x39, 0x3a, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48,
+    0x49, 0x4a, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58,
+    0x59, 0x5a, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68,
+    0x69, 0x6a, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78,
+    0x79, 0x7a, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87,
+    0x88, 0x89, 0x8a, 0x92, 0x93, 0x94, 0x95, 0x96,
+    0x97, 0x98, 0x99, 0x9a, 0xa2, 0xa3, 0xa4, 0xa5,
+    0xa6, 0xa7, 0xa8, 0xa9, 0xaa, 0xb2, 0xb3, 0xb4,
+    0xb5, 0xb6, 0xb7, 0xb8, 0xb9, 0xba, 0xc2, 0xc3,
+    0xc4, 0xc5, 0xc6, 0xc7, 0xc8, 0xc9, 0xca, 0xd2,
+    0xd3, 0xd4, 0xd5, 0xd6, 0xd7, 0xd8, 0xd9, 0xda,
+    0xe2, 0xe3, 0xe4, 0xe5, 0xe6, 0xe7, 0xe8, 0xe9,
+    0xea, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8,
+    0xf9, 0xfa,
+};
 
 void append_start_code(std::vector<std::uint8_t>& output)
 {
     output.insert(output.end(), std::begin(start_code), std::end(start_code));
+}
+
+void append_u16(std::vector<std::uint8_t>& output, std::uint16_t value)
+{
+    output.push_back(static_cast<std::uint8_t>(value >> 8U));
+    output.push_back(static_cast<std::uint8_t>(value & 0xffU));
+}
+
+void append_marker(std::vector<std::uint8_t>& output, std::uint8_t marker)
+{
+    output.push_back(0xff);
+    output.push_back(marker);
+}
+
+void make_jpeg_quant_tables(std::uint8_t q, std::array<std::uint8_t, 64>& luma, std::array<std::uint8_t, 64>& chroma)
+{
+    auto factor = static_cast<int>(q);
+    if (factor < 1) {
+        factor = 1;
+    } else if (factor > 99) {
+        factor = 99;
+    }
+    const auto scale = factor < 50 ? 5000 / factor : 200 - factor * 2;
+    for (std::size_t i = 0; i < luma.size(); ++i) {
+        const auto lq = std::clamp((static_cast<int>(jpeg_luma_quantizer[i]) * scale + 50) / 100, 1, 255);
+        const auto cq = std::clamp((static_cast<int>(jpeg_chroma_quantizer[i]) * scale + 50) / 100, 1, 255);
+        luma[i] = static_cast<std::uint8_t>(lq);
+        chroma[i] = static_cast<std::uint8_t>(cq);
+    }
+}
+
+void append_quant_header(std::vector<std::uint8_t>& output, const std::array<std::uint8_t, 64>& table, std::uint8_t table_id)
+{
+    append_marker(output, 0xdb);
+    append_u16(output, 67);
+    output.push_back(table_id);
+    output.insert(output.end(), table.begin(), table.end());
+}
+
+void append_huffman_header(std::vector<std::uint8_t>& output, const std::uint8_t* table, std::size_t size, std::uint8_t table_id, std::uint8_t table_class)
+{
+    append_marker(output, 0xc4);
+    append_u16(output, static_cast<std::uint16_t>(3U + size));
+    output.push_back(static_cast<std::uint8_t>((table_class << 4U) | table_id));
+    output.insert(output.end(), table, table + size);
+}
+
+void append_jpeg_header(
+    std::vector<std::uint8_t>& output,
+    std::uint8_t type,
+    std::uint16_t width,
+    std::uint16_t height,
+    const std::array<std::uint8_t, 64>& luma,
+    const std::array<std::uint8_t, 64>& chroma,
+    std::uint16_t restart_interval)
+{
+    append_marker(output, 0xd8);
+    append_quant_header(output, luma, 0);
+    append_quant_header(output, chroma, 1);
+    if (restart_interval != 0) {
+        append_marker(output, 0xdd);
+        append_u16(output, 4);
+        append_u16(output, restart_interval);
+    }
+    append_marker(output, 0xc0);
+    append_u16(output, 17);
+    output.push_back(8);
+    append_u16(output, height);
+    append_u16(output, width);
+    output.push_back(3);
+    output.push_back(0);
+    output.push_back(type == 0 ? 0x21 : 0x22);
+    output.push_back(0);
+    output.push_back(1);
+    output.push_back(0x11);
+    output.push_back(1);
+    output.push_back(2);
+    output.push_back(0x11);
+    output.push_back(1);
+    append_huffman_header(output, jpeg_huffman_luma_dc.data(), jpeg_huffman_luma_dc.size(), 0, 0);
+    append_huffman_header(output, jpeg_huffman_luma_ac.data(), jpeg_huffman_luma_ac.size(), 0, 1);
+    append_huffman_header(output, jpeg_huffman_chroma_dc.data(), jpeg_huffman_chroma_dc.size(), 1, 0);
+    append_huffman_header(output, jpeg_huffman_chroma_ac.data(), jpeg_huffman_chroma_ac.size(), 1, 1);
+    append_marker(output, 0xda);
+    append_u16(output, 12);
+    output.push_back(3);
+    output.push_back(0);
+    output.push_back(0);
+    output.push_back(1);
+    output.push_back(0x11);
+    output.push_back(2);
+    output.push_back(0x11);
+    output.push_back(0);
+    output.push_back(63);
+    output.push_back(0);
 }
 
 } // namespace
@@ -194,9 +371,10 @@ const std::string& RockchipMppRtpDecoder::last_error() const
 bool RockchipMppRtpDecoder::init_mpp(const std::string& codec)
 {
     h265_ = codec == "h265" || codec == "hevc";
-    const auto coding = h265_ ? MPP_VIDEO_CodingHEVC : MPP_VIDEO_CodingAVC;
+    mjpeg_ = codec == "mjpeg" || codec == "mjpg" || codec == "jpeg" || codec == "mjepg";
+    const auto coding = mjpeg_ ? MPP_VIDEO_CodingMJPEG : (h265_ ? MPP_VIDEO_CodingHEVC : MPP_VIDEO_CodingAVC);
     if (mpp_check_support_format(MPP_CTX_DEC, coding) != MPP_OK) {
-        last_error_ = h265_ ? "Rockchip MPP does not support HEVC decode" : "Rockchip MPP does not support AVC decode";
+        last_error_ = mjpeg_ ? "Rockchip MPP does not support MJPEG decode" : (h265_ ? "Rockchip MPP does not support HEVC decode" : "Rockchip MPP does not support AVC decode");
         return false;
     }
     MppCtx ctx {};
@@ -345,9 +523,11 @@ bool RockchipMppRtpDecoder::handle_rtp_packet(const std::uint8_t* packet, std::s
         have_sequence_ = true;
     }
 
-    return h265_
-        ? append_h265_payload(packet + offset, payload_size, marker, sequence, timestamp)
-        : append_h264_payload(packet + offset, payload_size, marker, sequence, timestamp);
+    if (mjpeg_) {
+        return append_mjpeg_payload(packet + offset, payload_size, marker, timestamp);
+    }
+    return h265_ ? append_h265_payload(packet + offset, payload_size, marker, sequence, timestamp)
+                 : append_h264_payload(packet + offset, payload_size, marker, sequence, timestamp);
 }
 
 bool RockchipMppRtpDecoder::append_h264_payload(const std::uint8_t* payload, std::size_t size, bool marker, std::uint16_t, std::uint32_t timestamp)
@@ -448,6 +628,89 @@ bool RockchipMppRtpDecoder::append_h265_payload(const std::uint8_t* payload, std
         }
     }
     return true;
+}
+
+bool RockchipMppRtpDecoder::append_mjpeg_payload(const std::uint8_t* payload, std::size_t size, bool marker, std::uint32_t timestamp)
+{
+    if (size < 8) {
+        return true;
+    }
+
+    const auto fragment_offset = (static_cast<std::uint32_t>(payload[1]) << 16U)
+        | (static_cast<std::uint32_t>(payload[2]) << 8U)
+        | static_cast<std::uint32_t>(payload[3]);
+    auto type = payload[4];
+    const auto q = payload[5];
+    const auto width = static_cast<std::uint16_t>(payload[6] == 0 ? 2048 : payload[6] * 8U);
+    const auto height = static_cast<std::uint16_t>(payload[7] == 0 ? 2048 : payload[7] * 8U);
+
+    std::size_t payload_offset = 8;
+    std::uint16_t restart_interval {};
+    if ((type & 0x40U) != 0) {
+        if (size < payload_offset + 4U) {
+            return true;
+        }
+        restart_interval = static_cast<std::uint16_t>((static_cast<std::uint16_t>(payload[payload_offset]) << 8U) | payload[payload_offset + 1U]);
+        payload_offset += 4U;
+        type = static_cast<std::uint8_t>(type & ~0x40U);
+    }
+
+    std::array<std::uint8_t, 64> luma {};
+    std::array<std::uint8_t, 64> chroma {};
+    if (q >= 128 && fragment_offset == 0) {
+        if (size < payload_offset + 4U) {
+            return true;
+        }
+        const auto precision = payload[payload_offset + 1U];
+        const auto table_length = static_cast<std::size_t>((static_cast<std::uint16_t>(payload[payload_offset + 2U]) << 8U) | payload[payload_offset + 3U]);
+        payload_offset += 4U;
+        if (precision != 0 || table_length < 128U || size < payload_offset + table_length) {
+            std::lock_guard lock(mutex_);
+            ++incomplete_fragments_;
+            return true;
+        }
+        std::copy_n(payload + payload_offset, luma.size(), luma.begin());
+        std::copy_n(payload + payload_offset + luma.size(), chroma.size(), chroma.begin());
+        payload_offset += table_length;
+    } else {
+        make_jpeg_quant_tables(q, luma, chroma);
+    }
+
+    if (payload_offset >= size) {
+        return true;
+    }
+
+    const auto* scan_data = payload + payload_offset;
+    const auto scan_size = size - payload_offset;
+    if (fragment_offset == 0) {
+        access_unit_.clear();
+        access_unit_timestamp_ = timestamp;
+        have_access_unit_ = true;
+        if (scan_size >= 2 && scan_data[0] == 0xff && scan_data[1] == 0xd8) {
+            access_unit_.insert(access_unit_.end(), scan_data, scan_data + scan_size);
+        } else {
+            append_jpeg_header(access_unit_, type, width, height, luma, chroma, restart_interval);
+            access_unit_.insert(access_unit_.end(), scan_data, scan_data + scan_size);
+        }
+    } else if (!have_access_unit_ || access_unit_timestamp_ != timestamp) {
+        std::lock_guard lock(mutex_);
+        ++incomplete_fragments_;
+        return true;
+    } else {
+        access_unit_.insert(access_unit_.end(), scan_data, scan_data + scan_size);
+    }
+
+    if (!marker) {
+        return true;
+    }
+    if (access_unit_.size() < 2 || access_unit_[access_unit_.size() - 2U] != 0xff || access_unit_[access_unit_.size() - 1U] != 0xd9) {
+        access_unit_.push_back(0xff);
+        access_unit_.push_back(0xd9);
+    }
+    const auto submitted = submit_packet(access_unit_.data(), access_unit_.size(), timestamp);
+    access_unit_.clear();
+    have_access_unit_ = false;
+    return submitted;
 }
 
 bool RockchipMppRtpDecoder::submit_nal(const std::uint8_t* data, std::size_t size, std::int64_t pts)
