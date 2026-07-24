@@ -43,6 +43,11 @@ is_enabled() {
   esac
 }
 
+is_rk3588() {
+  [ -r /proc/device-tree/compatible ] || return 1
+  grep -aq 'rockchip,rk3588' /proc/device-tree/compatible
+}
+
 detect_connected_mode() {
   for status in /sys/class/drm/card*-*/status; do
     [ -r "$status" ] || continue
@@ -208,6 +213,13 @@ else
   ARGS+=(--no-vblank-wait)
 fi
 
+if [ -z "${GLIDE_LD_LIBRARY_PATH:-}" ] \
+  && is_rk3588 \
+  && [ -c /dev/mali0 ] \
+  && [ -d /usr/lib/aarch64-linux-gnu/mali ]; then
+  GLIDE_LD_LIBRARY_PATH=/usr/lib/aarch64-linux-gnu/mali:/usr/lib/aarch64-linux-gnu
+  echo "openhd-glide: selected RK3588 Mali userspace libraries"
+fi
 if [ -n "${GLIDE_LD_LIBRARY_PATH:-}" ]; then
   export LD_LIBRARY_PATH="$GLIDE_LD_LIBRARY_PATH"
 fi

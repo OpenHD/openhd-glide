@@ -78,6 +78,26 @@ std::string errno_suffix()
     return std::string(": ") + std::strerror(errno);
 }
 
+bool is_rk3588_device()
+{
+    static const bool detected = [] {
+        const int fd = open("/proc/device-tree/compatible", O_RDONLY | O_CLOEXEC);
+        if (fd < 0) {
+            return false;
+        }
+
+        std::string compatible;
+        char buffer[256];
+        ssize_t bytes_read {};
+        while ((bytes_read = read(fd, buffer, sizeof(buffer))) > 0) {
+            compatible.append(buffer, static_cast<std::size_t>(bytes_read));
+        }
+        close(fd);
+        return compatible.find("rockchip,rk3588") != std::string::npos;
+    }();
+    return detected;
+}
+
 void page_flip_handler(int, unsigned int, unsigned int, unsigned int, void* data)
 {
     if (data != nullptr) {
@@ -1665,6 +1685,7 @@ bool KmsAtomicCompositor::choose_ui_plane()
         last_error_ = "failed to read KMS plane resources";
         return false;
     }
+    const bool allow_video_capable_plane = is_rk3588_device();
 
     auto try_plane = [&](drmModePlane* plane) {
         const auto type = plane_type(drm_fd_, plane->plane_id);
@@ -1674,7 +1695,7 @@ bool KmsAtomicCompositor::choose_ui_plane()
             && available
             && plane_supports_format(plane, DRM_FORMAT_ARGB8888)
             && plane_supports_format_modifier(drm_fd_, plane->plane_id, DRM_FORMAT_ARGB8888, DRM_FORMAT_MOD_LINEAR)
-            && !plane_supports_video_scanout_format(plane)
+            && (allow_video_capable_plane || !plane_supports_video_scanout_format(plane))
             && plane_can_host_alpha_overlay(type);
     };
 
