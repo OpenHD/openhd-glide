@@ -215,10 +215,18 @@ fi
 
 if [ -z "${GLIDE_LD_LIBRARY_PATH:-}" ] \
   && is_rk3588 \
-  && [ -c /dev/mali0 ] \
   && [ -d /usr/lib/aarch64-linux-gnu/mali ]; then
-  GLIDE_LD_LIBRARY_PATH=/usr/lib/aarch64-linux-gnu/mali:/usr/lib/aarch64-linux-gnu
-  echo "openhd-glide: selected RK3588 Mali userspace libraries"
+  mali_wait_attempt=0
+  while [ ! -c /dev/mali0 ] && [ "$mali_wait_attempt" -lt 100 ]; do
+    sleep 0.1
+    mali_wait_attempt=$((mali_wait_attempt + 1))
+  done
+  if [ -c /dev/mali0 ]; then
+    GLIDE_LD_LIBRARY_PATH=/usr/lib/aarch64-linux-gnu/mali:/usr/lib/aarch64-linux-gnu
+    echo "openhd-glide: selected RK3588 Mali userspace libraries"
+  else
+    echo "openhd-glide: RK3588 Mali device did not become ready; retaining the default graphics libraries" >&2
+  fi
 fi
 if [ -n "${GLIDE_LD_LIBRARY_PATH:-}" ]; then
   export LD_LIBRARY_PATH="$GLIDE_LD_LIBRARY_PATH"
