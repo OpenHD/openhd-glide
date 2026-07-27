@@ -1065,7 +1065,7 @@ struct SharedUiBuffer {
 
 int run_kms_video_preview(const Options& options)
 {
-#if OPENHD_GLIDE_DEVICE_KMS && (OPENHD_GLIDE_HAS_GSTREAMER || OPENHD_GLIDE_HAS_CEDAR)
+#if OPENHD_GLIDE_DEVICE_KMS && (OPENHD_GLIDE_HAS_GSTREAMER || OPENHD_GLIDE_HAS_CEDAR || OPENHD_GLIDE_HAS_RKMPP)
     stop_requested = 0;
     signal(SIGINT, request_stop);
     signal(SIGTERM, request_stop);
@@ -2280,7 +2280,7 @@ int run_kms_video_preview(const Options& options)
 #endif
 #else
     (void)options;
-    glide::log(glide::LogLevel::error, "OpenHD-Glide", "--kms-video-preview requires device KMS plus native Cedar or GStreamer support");
+    glide::log(glide::LogLevel::error, "OpenHD-Glide", "--kms-video-preview requires device KMS plus native RKMPP, Cedar, or GStreamer support");
     return 1;
 #endif
 }
