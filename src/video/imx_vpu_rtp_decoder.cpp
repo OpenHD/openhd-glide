@@ -86,6 +86,9 @@ bool ImxVpuRtpDecoder::poll(glide::dev::DmabufVideoFrame& frame)
         if (!handle_rtp_packet(packet.data(), static_cast<std::size_t>(received))) {
             return false;
         }
+        if (current_frame_ == nullptr && deliver_ready_frame(frame)) {
+            return true;
+        }
     }
     return current_frame_ == nullptr && deliver_ready_frame(frame);
 #else
