@@ -113,7 +113,7 @@ glide_prepare_kms_example_service
 sudo "${SUDO_ARGS[@]}" env "${ENV_ARGS[@]}" \
   "$BIN" \
   --kms-video-preview \
-  --native-rkmpp-video \
+  "${GLIDE_NATIVE_VIDEO_FLAG:---native-rkmpp-video}" \
   --view-udp-port "$PORT" \
   --view-udp-codec "$CODEC" \
   --preview-width "$WIDTH" \

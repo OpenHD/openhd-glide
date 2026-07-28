@@ -42,6 +42,7 @@
 #include "platform/drm_probe.hpp"
 #include "platform/process_probe.hpp"
 #include "video/cedar_rtp_decoder.hpp"
+#include "video/imx_vpu_rtp_decoder.hpp"
 #include "video/rockchip_mpp_rtp_decoder.hpp"
 
 #include <algorithm>
@@ -281,6 +282,7 @@ struct Options {
     bool atomic_kms {};
     bool vblank_wait {};
     bool native_cedar_video {};
+    bool native_imxvpu_video {};
     bool native_rkmpp_video {};
     bool async_flow { true };
     bool flow_debug_solid {};
@@ -481,12 +483,19 @@ Options parse_options(int argc, char** argv)
             options.vertical_stack = true;
         } else if (argument == "--native-cedar-video") {
             options.native_cedar_video = true;
+            options.native_imxvpu_video = false;
+            options.native_rkmpp_video = false;
+        } else if (argument == "--native-imxvpu-video") {
+            options.native_imxvpu_video = true;
+            options.native_cedar_video = false;
             options.native_rkmpp_video = false;
         } else if (argument == "--native-rkmpp-video") {
             options.native_rkmpp_video = true;
             options.native_cedar_video = false;
+            options.native_imxvpu_video = false;
         } else if (argument == "--gstreamer-video") {
             options.native_cedar_video = false;
+            options.native_imxvpu_video = false;
             options.native_rkmpp_video = false;
         } else if (argument == "--no-flow") {
             options.flow_overlay = false;
@@ -1733,6 +1742,80 @@ int run_kms_video_preview(const Options& options)
     }
 #endif
 
+#if OPENHD_GLIDE_HAS_IMXVPU
+    if (options.native_imxvpu_video) {
+        glide::video::ImxVpuRtpDecoder imxvpu;
+        if (!imxvpu.start(options.view_udp_port, options.view_udp_codec)) {
+            glide::log(glide::LogLevel::error, "OpenHD-Glide", imxvpu.last_error());
+            return 1;
+        }
+
+        glide::log(
+            glide::LogLevel::info,
+            "OpenHD-Glide",
+            "native NXP i.MX VPU API 2 RTP/" + options.view_udp_codec + " decoder running without GStreamer");
+        glide::log(
+            glide::LogLevel::info,
+            "OpenHD-Glide",
+            use_atomic_kms ? "atomic KMS video+Flow compositor running" : "fast legacy KMS video plane running");
+
+        std::uint64_t frames {};
+        std::uint64_t frames_since_log {};
+        auto last_log = std::chrono::steady_clock::now();
+        auto last_waiting_log = last_log;
+        while (stop_requested == 0) {
+            poll_control();
+            glide::dev::DmabufVideoFrame frame;
+            if (!imxvpu.poll(frame)) {
+                if (!imxvpu.last_error().empty()) {
+                    glide::log(glide::LogLevel::error, "OpenHD-Glide", imxvpu.last_error());
+                    return 1;
+                }
+                if (!maybe_present_waiting_overlay()) {
+                    return 1;
+                }
+                const auto now = std::chrono::steady_clock::now();
+                if (now - last_waiting_log >= std::chrono::seconds(1)) {
+                    glide::log(glide::LogLevel::info, "OpenHD-Glide", "waiting for native i.MX VPU decoded frame " + imxvpu.stats());
+                    last_waiting_log = now;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                continue;
+            }
+
+            if (!present_video_frame(frame, frames)) {
+                return 1;
+            }
+            imxvpu.mark_presented();
+            ++frames;
+            ++frames_since_log;
+
+            const auto now = std::chrono::steady_clock::now();
+            if (now - last_log >= std::chrono::seconds(1)) {
+                const auto elapsed = std::chrono::duration<double>(now - last_log).count();
+                const auto current_fps = static_cast<double>(frames_since_log) / elapsed;
+                video_plane_fps.store(current_fps);
+                std::ostringstream status;
+                status.setf(std::ios::fixed);
+                status.precision(1);
+                status << "native NXP i.MX VPU " << (use_atomic_kms ? "atomic video+Flow" : "legacy video")
+                       << " fps=" << current_fps
+                       << " total_frames=" << frames
+                       << ' ' << imxvpu.stats();
+                glide::log(glide::LogLevel::info, "OpenHD-Glide", status.str());
+                frames_since_log = 0;
+                last_log = now;
+            }
+        }
+        return 0;
+    }
+#else
+    if (options.native_imxvpu_video) {
+        glide::log(glide::LogLevel::error, "OpenHD-Glide", "native NXP i.MX VPU decoder support was not found at build time");
+        return 1;
+    }
+#endif
+
 #if OPENHD_GLIDE_HAS_RKMPP
     if (options.native_rkmpp_video) {
         glide::video::RockchipMppRtpDecoder rkmpp;
@@ -2280,7 +2363,7 @@ int run_kms_video_preview(const Options& options)
 #endif
 #else
     (void)options;
-    glide::log(glide::LogLevel::error, "OpenHD-Glide", "--kms-video-preview requires device KMS plus native RKMPP, Cedar, or GStreamer support");
+    glide::log(glide::LogLevel::error, "OpenHD-Glide", "--kms-video-preview requires device KMS plus native i.MX VPU, RKMPP, Cedar, or GStreamer support");
     return 1;
 #endif
 }
