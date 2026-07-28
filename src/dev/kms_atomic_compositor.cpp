@@ -1766,7 +1766,34 @@ bool KmsAtomicCompositor::create_flow_surface()
     gbm_surface* modifier_surface {};
     const auto driver_name = drm_driver_name(drm_fd_);
     const bool rockchip_drm = driver_name.find("rockchip") != std::string::npos;
-    if (rockchip_drm) {
+    if (rockchip_drm && is_rk3588_device()) {
+        // The RK3588 vendor VOP2 driver can advertise Panfrost's preferred
+        // AFBC variants through IN_FORMATS and still reject them from
+        // rockchip_vop2_mod_supported() during the atomic commit. Request a
+        // linear surface explicitly so GBM does not choose an unusable AFBC
+        // modifier for the Flow plane.
+        const std::array<std::uint64_t, 1> linear_modifier {
+            DRM_FORMAT_MOD_LINEAR,
+        };
+#if OPENHD_GLIDE_HAS_GBM_SURFACE_CREATE_WITH_MODIFIERS2
+        modifier_surface = gbm_surface_create_with_modifiers2(
+            static_cast<gbm_device*>(gbm_device_),
+            flow_surface_.width,
+            flow_surface_.height,
+            GBM_FORMAT_ARGB8888,
+            linear_modifier.data(),
+            linear_modifier.size(),
+            use_flags);
+#else
+        modifier_surface = gbm_surface_create_with_modifiers(
+            static_cast<gbm_device*>(gbm_device_),
+            flow_surface_.width,
+            flow_surface_.height,
+            GBM_FORMAT_ARGB8888,
+            linear_modifier.data(),
+            linear_modifier.size());
+#endif
+    } else if (rockchip_drm) {
         const std::array<std::uint64_t, 9> rockchip_overlay_modifiers {
             arm_afbc_16x16_modifier,
             arm_afbc_16x16_sparse_modifier,
@@ -1814,7 +1841,11 @@ bool KmsAtomicCompositor::create_flow_surface()
         glide::LogLevel::info,
         "OpenHD-Glide",
         "Flow GBM overlay surface created for DRM driver '" + (driver_name.empty() ? std::string("unknown") : driver_name)
-            + (rockchip_drm && modifier_surface != nullptr ? "' with Rockchip AFBC modifier candidates" : "' with default scanout allocation"));
+            + (rockchip_drm && is_rk3588_device() && modifier_surface != nullptr
+                    ? "' with an RK3588-compatible linear modifier"
+                    : rockchip_drm && modifier_surface != nullptr
+                    ? "' with Rockchip AFBC modifier candidates"
+                    : "' with default scanout allocation"));
     return true;
 }
 
