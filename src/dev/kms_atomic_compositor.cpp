@@ -78,6 +78,26 @@ std::string errno_suffix()
     return std::string(": ") + std::strerror(errno);
 }
 
+bool is_rk3588_device()
+{
+    static const bool detected = [] {
+        const int fd = open("/proc/device-tree/compatible", O_RDONLY | O_CLOEXEC);
+        if (fd < 0) {
+            return false;
+        }
+
+        std::string compatible;
+        char buffer[256];
+        ssize_t bytes_read {};
+        while ((bytes_read = read(fd, buffer, sizeof(buffer))) > 0) {
+            compatible.append(buffer, static_cast<std::size_t>(bytes_read));
+        }
+        close(fd);
+        return compatible.find("rockchip,rk3588") != std::string::npos;
+    }();
+    return detected;
+}
+
 void page_flip_handler(int, unsigned int, unsigned int, unsigned int, void* data)
 {
     if (data != nullptr) {
@@ -1665,6 +1685,7 @@ bool KmsAtomicCompositor::choose_ui_plane()
         last_error_ = "failed to read KMS plane resources";
         return false;
     }
+    const bool allow_video_capable_plane = is_rk3588_device();
 
     auto try_plane = [&](drmModePlane* plane) {
         const auto type = plane_type(drm_fd_, plane->plane_id);
@@ -1674,7 +1695,7 @@ bool KmsAtomicCompositor::choose_ui_plane()
             && available
             && plane_supports_format(plane, DRM_FORMAT_ARGB8888)
             && plane_supports_format_modifier(drm_fd_, plane->plane_id, DRM_FORMAT_ARGB8888, DRM_FORMAT_MOD_LINEAR)
-            && !plane_supports_video_scanout_format(plane)
+            && (allow_video_capable_plane || !plane_supports_video_scanout_format(plane))
             && plane_can_host_alpha_overlay(type);
     };
 
@@ -1745,7 +1766,34 @@ bool KmsAtomicCompositor::create_flow_surface()
     gbm_surface* modifier_surface {};
     const auto driver_name = drm_driver_name(drm_fd_);
     const bool rockchip_drm = driver_name.find("rockchip") != std::string::npos;
-    if (rockchip_drm) {
+    if (rockchip_drm && is_rk3588_device()) {
+        // The RK3588 vendor VOP2 driver can advertise Panfrost's preferred
+        // AFBC variants through IN_FORMATS and still reject them from
+        // rockchip_vop2_mod_supported() during the atomic commit. Request a
+        // linear surface explicitly so GBM does not choose an unusable AFBC
+        // modifier for the Flow plane.
+        const std::array<std::uint64_t, 1> linear_modifier {
+            DRM_FORMAT_MOD_LINEAR,
+        };
+#if OPENHD_GLIDE_HAS_GBM_SURFACE_CREATE_WITH_MODIFIERS2
+        modifier_surface = gbm_surface_create_with_modifiers2(
+            static_cast<gbm_device*>(gbm_device_),
+            flow_surface_.width,
+            flow_surface_.height,
+            GBM_FORMAT_ARGB8888,
+            linear_modifier.data(),
+            linear_modifier.size(),
+            use_flags);
+#else
+        modifier_surface = gbm_surface_create_with_modifiers(
+            static_cast<gbm_device*>(gbm_device_),
+            flow_surface_.width,
+            flow_surface_.height,
+            GBM_FORMAT_ARGB8888,
+            linear_modifier.data(),
+            linear_modifier.size());
+#endif
+    } else if (rockchip_drm) {
         const std::array<std::uint64_t, 9> rockchip_overlay_modifiers {
             arm_afbc_16x16_modifier,
             arm_afbc_16x16_sparse_modifier,
@@ -1793,7 +1841,11 @@ bool KmsAtomicCompositor::create_flow_surface()
         glide::LogLevel::info,
         "OpenHD-Glide",
         "Flow GBM overlay surface created for DRM driver '" + (driver_name.empty() ? std::string("unknown") : driver_name)
-            + (rockchip_drm && modifier_surface != nullptr ? "' with Rockchip AFBC modifier candidates" : "' with default scanout allocation"));
+            + (rockchip_drm && is_rk3588_device() && modifier_surface != nullptr
+                    ? "' with an RK3588-compatible linear modifier"
+                    : rockchip_drm && modifier_surface != nullptr
+                    ? "' with Rockchip AFBC modifier candidates"
+                    : "' with default scanout allocation"));
     return true;
 }
 

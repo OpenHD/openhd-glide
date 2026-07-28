@@ -76,8 +76,11 @@ case "$CODEC" in
   h265|hevc)
     CODEC="h265"
     ;;
+  mjpeg|mjpg|jpeg|mjepg)
+    CODEC="mjpeg"
+    ;;
   *)
-    echo "unsupported codec '${CODEC}'; use h264 or h265" >&2
+    echo "unsupported codec '${CODEC}'; use h264, h265, or mjpeg" >&2
     exit 2
     ;;
 esac
@@ -110,7 +113,7 @@ glide_prepare_kms_example_service
 sudo "${SUDO_ARGS[@]}" env "${ENV_ARGS[@]}" \
   "$BIN" \
   --kms-video-preview \
-  --native-rkmpp-video \
+  "${GLIDE_NATIVE_VIDEO_FLAG:---native-rkmpp-video}" \
   --view-udp-port "$PORT" \
   --view-udp-codec "$CODEC" \
   --preview-width "$WIDTH" \

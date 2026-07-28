@@ -35,6 +35,21 @@ It also computes the first worker CPU assignment plan: `glide-view` gets the str
 
 ## Build
 
+### Orqa cross-build
+
+The `crosscompile-orqa.yml` GitHub Actions workflow uses the Orqa Yocto SDK
+and produces a stripped AArch64 rootfs archive. The target profile is based on
+the live DTK-EVK at `192.168.7.145`: SDL2, native Rockchip MPP, and native
+Allwinner Cedar are disabled. H.264/H.265 video decoding uses the target's
+`libimxvpuapi2` Hantro VPU backend directly and exports NV12 DMA-BUF frames;
+the Orqa artifact does not link GStreamer.
+
+Before packaging, `scripts/verify-orqa-runtime-abi.sh` checks every executable
+is AArch64, verifies the DRM/GBM/EGL/GLES, FreeType, i.MX VPU API 2,
+DMA-buffer, and zlib SONAMEs used by the live Scarthgap image, and rejects
+SDL2, GStreamer, MPP, or Cedar dependencies. The workflow publishes
+`openhd-glide-orqa-aarch64.tar.gz`.
+
 ```sh
 cmake -S . -B build
 cmake --build build
@@ -191,6 +206,7 @@ and runs `glide-ui` headless until the LVGL shared-buffer/plane backend exists.
 `glide-view` listens for UDP RTP video on port 5600 by default and decodes through GStreamer into `appsink`.
 It supports H.264, H.265, and MJPEG with `--udp-codec h264|h265|mjpeg`; H.264 remains the default for
 existing senders.
+For desktop and WSL debugging, add `--display` to present decoded frames through GStreamer's `autovideosink`.
 It intentionally does not use `kmssink`, because `kmssink` would compete for DRM/KMS master. The next production step is
 Unix-socket FD passing so `glide-view` can hand decoded DMABUFs to `openhd-glide`, while only `openhd-glide` imports
 buffers and programs KMS planes.
@@ -207,6 +223,12 @@ sudo ./build-kms/glide-view --udp-video --udp-port 5600
 
 This command does not display video. It should log `first decoded sample ...` and `decoded fps=...` once RTP/H.264
 frames arrive. If those lines do not appear, the sender is not reaching the receiver or the stream caps do not match.
+To show a desktop debug window instead, use:
+
+```sh
+./build-kms/glide-view --udp-video --udp-port 5600 --udp-codec mjpeg --display
+```
+
 On Rockchip RK3566/RK3568 images, the hardware path should use `mppvideodec`, and running under `sudo` may be required
 until the MPP/RGA/video device nodes have suitable permissions. On Allwinner BSP images, the hardware path may use
 `omxh264dec` instead of `v4l2h264dec`, and running under `sudo` is often required because the cedar and DMA heap device
@@ -223,6 +245,30 @@ and scanning it out on a KMS video plane. It still uses a black primary framebuf
 Flow is rendered on an ARGB overlay plane. With `--ui-overlay`, the controller also places a left-side ARGB UI
 overlay plane or composites the LVGL buffer into the Flow/OSD plane when RK3566 exposes only one usable ARGB plane.
 Native Cedar remains available only through the explicit `--native-cedar-video` flag.
+On NXP i.MX8M Plus, use `--native-imxvpu-video` for direct
+`libimxvpuapi2`/Hantro decoding without GStreamer. The controller imports the
+NV12 DMA-BUF on the video plane while Flow and LVGL remain independent ARGB
+planes (or share the existing Flow fallback when the display exposes fewer
+usable overlay planes).
+On detected NXP i.MX hardware, if KMS exposes no NV12 scanout plane, Glide
+automatically imports the decoded DMA-BUF as an EGLImage and composites video,
+Flow, and LVGL with GLES into one RGB primary surface. The native i.MX VPU mode
+and this fallback are rejected on non-NXP hardware. The i.MX launcher defaults
+display and Flow cadence to 60 Hz/fps; override `GLIDE_DISPLAY_HZ` or
+`GLIDE_FLOW_FPS` when required.
+
+On the ORQA i.MX8MP board, `/dev/video3` is a 960x720 source. All three media
+pads must use that width; 944x720 truncates every CSI line and produces green or
+mangled frames. The hardware camera/encoder test sender configures the pads and
+streams RTP/H.264 at 60 fps:
+
+```bash
+examples/stream-orqa-video3-to-glide.sh 127.0.0.1 5600
+```
+
+This script is NXP-gated and uses GStreamer only as an external camera test
+sender. Glide still performs native `libimxvpuapi2` decoding and direct
+DMA-BUF/EGL composition without GStreamer.
 On Raspberry Pi, start with the GStreamer path and the real KMS driver (`vc4-kms-v3d`). Raspberry Pi 5
 images should not be treated as H.264 hardware decode/encode targets; the current practical bring-up path is
 RTP/MJPEG in video-only KMS mode, where Glide decodes JPEG in software, copies BGRx into a DRM dumb buffer,
@@ -231,11 +277,15 @@ still use V4L2/DMABUF when the sender provides H.265 and the OS exposes the HEVC
 
 Example run scripts cover the current device modes. Each script takes the UDP video port as its first optional
 argument, defaulting to `5600`; GStreamer/view scripts usually default to H.264 and take `h264`, `h265`, or
-`mjpeg` as the second optional argument where supported. The Raspberry Pi video-only script defaults to MJPEG.
+`mjpeg` as the second optional argument where supported. The RKMPP scripts use native MPP decode for H.264, H.265,
+and MJPEG. The Raspberry Pi video-only script defaults to MJPEG.
 Set `GLIDE_WIDTH` and `GLIDE_HEIGHT` to override the default `1920x1080`.
 Device KMS scripts default to `GLIDE_DISPLAY_HZ=0`, which auto-selects the highest refresh mode exposed by the connected display. Set `GLIDE_DISPLAY_HZ` to a non-zero value to request a specific refresh rate.
 
 ```sh
+# Native NXP i.MX8M Plus Hantro decode, KMS video plus Flow and LVGL UI.
+examples/run-kms-video-imxvpu-flow-ui.sh 5600 h264
+
 # Native Rockchip MPP decode, fastest RK3566/RK3568 video-only path.
 examples/run-kms-video-rkmpp-video-only.sh 5600 h264
 
@@ -268,6 +318,9 @@ examples/run-kms-video-cedar-video-only.sh 5600
 # Standalone glide-view decode-only test.
 examples/run-glide-view-decode-only.sh 5600 h264
 examples/run-glide-view-decode-only.sh 5600 mjpeg
+
+# WSL/desktop visible glide-view test.
+GLIDE_VIEW_DISPLAY=1 examples/run-wsl-video-decode.sh 5600 mjpeg
 
 # Multi-process KMS stack smoke test.
 examples/run-kms-stack.sh 5600 h264
@@ -310,13 +363,42 @@ examples/stream-mjpeg-videotestsrc-to-glide.sh <target-ip> 5600
 ```
 
 Use the Pi's actual network IP as `<target-ip>`. For a sender running on the same Pi, use `127.0.0.1`.
-The Linux sender requires a hardware encoder such as `v4l2h264enc` by default. Set
-`GLIDE_ALLOW_SOFTWARE_ENCODER=1` only when you intentionally want a non-performance `x264enc` fallback.
-The script performs a small encoder self-test first. If `v4l2h264enc` fails with `bcm2835-codec ... ret -3` in
+If both devices are running Glide on the same Ethernet subnet, scan for the receiver instead of typing
+an address:
+
+```sh
+./build-kms/openhd-glide --ethernet-discover --view-udp-port 5600
+examples/stream-videotestsrc-to-glide-auto.sh 5600
+```
+
+For a direct cable without a router, put one device in the ground preset and the other in the air preset,
+then run the same scan/stream command. Replace `eth0` with the actual Ethernet interface name if needed:
+
+```sh
+sudo ./build-kms/openhd-glide --ethernet-p2p ground eth0
+sudo ./build-kms/openhd-glide --ethernet-p2p air eth0
+```
+
+On a Raspberry Pi 5 camera sender, use `rpicam-vid`/`libcamera-vid` directly for MJPEG capture,
+with GStreamer only packetizing the camera stream into RTP:
+
+```sh
+examples/stream-rpicam-to-glide.sh <target-ip> 5600
+examples/stream-rpicam-to-glide.sh auto 5600
+```
+
+When run from an interactive terminal, the script prints `rpicam-vid --list-cameras` output, lets you
+choose a sensor mode, then prompts for FPS and MJPEG quality before starting the stream. Useful overrides are
+`GLIDE_CAMERA_INTERACTIVE=0`, `GLIDE_CAMERA_INDEX`, `GLIDE_CAMERA_WIDTH`, `GLIDE_CAMERA_HEIGHT`,
+`GLIDE_CAMERA_FPS`, `GLIDE_MJPEG_QUALITY`, and `GLIDE_RPICAM_EXTRA_ARGS`.
+
+The Linux H.264 videotest sender, `examples/stream-videotestsrc-to-glide-view.sh`, requires a hardware encoder
+such as `v4l2h264enc` by default. Set `GLIDE_ALLOW_SOFTWARE_ENCODER=1` only when you intentionally want a
+non-performance `x264enc` fallback. That script performs a small encoder self-test first. If `v4l2h264enc` fails with `bcm2835-codec ... ret -3` in
 `dmesg`, the Raspberry Pi encoder driver is failing independently of Glide; use another sender with hardware H.264 or
 fix the Pi encoder stack before using it for performance measurements.
-For Raspberry Pi 5 MJPEG bring-up, use `examples/stream-mjpeg-videotestsrc-to-glide.sh`; it uses `jpegenc`
-and `rtpjpegpay` instead of an H.264 encoder.
+For Raspberry Pi 5 MJPEG test-pattern bring-up without a camera, use `examples/stream-mjpeg-videotestsrc-to-glide.sh`;
+it uses `jpegenc` and `rtpjpegpay` instead of an H.264 encoder.
 
 To avoid sender-side encoding entirely, stream a downloaded H.264 MP4:
 

@@ -25,9 +25,12 @@
 #include "common/ipc.hpp"
 #include "common/mavlink_state.hpp"
 #include "common/mavlink_udp_bridge.hpp"
+#include "common/network_discovery.hpp"
 #include "common/preview_control.hpp"
+#include "dev/dmabuf_gles_video_renderer.hpp"
 #include "dev/kms_atomic_compositor.hpp"
 #include "dev/kms_dmabuf_video_plane.hpp"
+#include "dev/kms_gles_window.hpp"
 #include "glide_flow/altitude_widget.hpp"
 #include "glide_flow/fps_counter.hpp"
 #include "glide_flow/fps_overlay.hpp"
@@ -41,6 +44,7 @@
 #include "platform/drm_probe.hpp"
 #include "platform/process_probe.hpp"
 #include "video/cedar_rtp_decoder.hpp"
+#include "video/imx_vpu_rtp_decoder.hpp"
 #include "video/rockchip_mpp_rtp_decoder.hpp"
 
 #include <algorithm>
@@ -76,9 +80,53 @@
 #include <gst/video/video.h>
 #endif
 
+#if OPENHD_GLIDE_HAS_KMS_GBM
+#include <drm_fourcc.h>
+#endif
+
 namespace {
 
 volatile std::sig_atomic_t stop_requested = 0;
+
+bool is_nxp_imx_hardware()
+{
+#if defined(__linux__)
+    const int fd = open("/proc/device-tree/compatible", O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        return false;
+    }
+
+    std::array<char, 4096> compatible {};
+    const auto bytes_read = read(fd, compatible.data(), compatible.size());
+    close(fd);
+    if (bytes_read <= 0) {
+        return false;
+    }
+
+    const std::string device_compatibility(compatible.data(), static_cast<std::size_t>(bytes_read));
+    return device_compatibility.find("fsl,imx") != std::string::npos;
+#else
+    return false;
+#endif
+}
+
+bool connected_kms_supports_nv12()
+{
+#if OPENHD_GLIDE_HAS_KMS_GBM
+    const auto probe = glide::platform::probe_drm_planes();
+    for (const auto& device : probe.devices) {
+        if (!device.available) {
+            continue;
+        }
+        for (const auto& plane : device.planes) {
+            if (std::find(plane.formats.begin(), plane.formats.end(), DRM_FORMAT_NV12) != plane.formats.end()) {
+                return true;
+            }
+        }
+    }
+#endif
+    return false;
+}
 
 std::string rgb_hex(std::uint32_t rgb)
 {
@@ -280,6 +328,7 @@ struct Options {
     bool atomic_kms {};
     bool vblank_wait {};
     bool native_cedar_video {};
+    bool native_imxvpu_video {};
     bool native_rkmpp_video {};
     bool async_flow { true };
     bool flow_debug_solid {};
@@ -293,6 +342,10 @@ struct Options {
     std::uint32_t writeback_record_frames { 30 };
     std::uint32_t writeback_record_every { 6 };
     bool mavlink_udp { true };
+    bool ethernet_discover {};
+    bool ethernet_p2p {};
+    std::string ethernet_p2p_role { "ground" };
+    std::string ethernet_p2p_interface {};
 };
 
 struct RuntimeControlState {
@@ -304,6 +357,7 @@ struct RuntimeControlState {
 };
 
 void start_mavlink_bridge(glide::mavlink::UdpBridge& bridge, const Options& options);
+void start_network_discovery(glide::net::DiscoveryService& discovery, const Options& options);
 
 void send_initial_control_state(glide::ipc::Server& ipc_server, int client_id, const RuntimeControlState& state)
 {
@@ -315,9 +369,48 @@ void send_initial_control_state(glide::ipc::Server& ipc_server, int client_id, c
     send_theme_state(ipc_server, client_id);
 }
 
+void send_network_state(glide::ipc::Server& ipc_server, int client_id, const glide::net::DiscoveryService& discovery)
+{
+    ipc_server.send_line(client_id, "state net idle");
+    for (const auto& peer : discovery.peers()) {
+        ipc_server.send_line(client_id, "state net peer " + peer.address + " " + peer.hostname + " " + std::to_string(peer.video_port));
+    }
+}
+
+bool handle_network_line(const std::string& line, glide::ipc::Server& ipc_server, int client_id, glide::net::DiscoveryService& discovery)
+{
+    if (line == "get net") {
+        send_network_state(ipc_server, client_id, discovery);
+        return true;
+    }
+    if (line == "net scan") {
+        discovery.start_scan();
+        return true;
+    }
+    if (line.rfind("net p2p ", 0) == 0) {
+        std::istringstream stream(line);
+        std::string prefix;
+        std::string command;
+        std::string role;
+        std::string interface_name;
+        stream >> prefix >> command >> role >> interface_name;
+        const auto result = glide::net::configure_point_to_point(glide::net::PointToPointOptions {
+            .interface_name = interface_name,
+            .role = role,
+        });
+        ipc_server.broadcast_line("state net p2p " + result);
+        if (result.rfind("ok ", 0) == 0) {
+            discovery.start_scan();
+        }
+        return true;
+    }
+    return false;
+}
+
 bool poll_runtime_controls(
     glide::ipc::Server& ipc_server,
     glide::mavlink::UdpBridge& mavlink_bridge,
+    glide::net::DiscoveryService& discovery,
     RuntimeControlState& state,
     glide::mavlink::Snapshot& mavlink)
 {
@@ -335,9 +428,13 @@ bool poll_runtime_controls(
         }
         ipc_server.broadcast_line(line);
     }
+    for (const auto& line : discovery.poll_state_lines()) {
+        ipc_server.broadcast_line(line);
+    }
     for (const auto& event : ipc_server.poll()) {
         if (event.line.rfind("hello ", 0) == 0) {
             send_initial_control_state(ipc_server, event.client_id, state);
+            send_network_state(ipc_server, event.client_id, discovery);
         } else if (event.line == "get fps") {
             ipc_server.send_line(event.client_id, std::string("state fps ") + (state.fps_enabled ? "1" : "0"));
         } else if (event.line == "get coords") {
@@ -350,6 +447,7 @@ bool poll_runtime_controls(
             ipc_server.send_line(event.client_id, "state osd " + state.osd_layout);
         } else if (event.line == "get theme") {
             send_theme_state(ipc_server, event.client_id);
+        } else if (handle_network_line(event.line, ipc_server, event.client_id, discovery)) {
         } else if (event.line == "set fps 0" || event.line == "set fps 1") {
             state.fps_enabled = event.line.back() == '1';
             glide::preview_control::set_fps_overlay_enabled(state.fps_enabled);
@@ -431,12 +529,19 @@ Options parse_options(int argc, char** argv)
             options.vertical_stack = true;
         } else if (argument == "--native-cedar-video") {
             options.native_cedar_video = true;
+            options.native_imxvpu_video = false;
+            options.native_rkmpp_video = false;
+        } else if (argument == "--native-imxvpu-video") {
+            options.native_imxvpu_video = true;
+            options.native_cedar_video = false;
             options.native_rkmpp_video = false;
         } else if (argument == "--native-rkmpp-video") {
             options.native_rkmpp_video = true;
             options.native_cedar_video = false;
+            options.native_imxvpu_video = false;
         } else if (argument == "--gstreamer-video") {
             options.native_cedar_video = false;
+            options.native_imxvpu_video = false;
             options.native_rkmpp_video = false;
         } else if (argument == "--no-flow") {
             options.flow_overlay = false;
@@ -476,6 +581,12 @@ Options parse_options(int argc, char** argv)
             options.writeback_record_every = static_cast<std::uint32_t>(std::stoul(argv[++i]));
         } else if (argument == "--no-mavlink") {
             options.mavlink_udp = false;
+        } else if (argument == "--ethernet-discover") {
+            options.ethernet_discover = true;
+        } else if (argument == "--ethernet-p2p" && i + 2 < argc) {
+            options.ethernet_p2p = true;
+            options.ethernet_p2p_role = argv[++i];
+            options.ethernet_p2p_interface = argv[++i];
         }
     }
     if (options.flow_primary_readback) {
@@ -1009,19 +1120,41 @@ struct SharedUiBuffer {
 
 int run_kms_video_preview(const Options& options)
 {
-#if OPENHD_GLIDE_DEVICE_KMS && (OPENHD_GLIDE_HAS_GSTREAMER || OPENHD_GLIDE_HAS_CEDAR)
+#if OPENHD_GLIDE_DEVICE_KMS && (OPENHD_GLIDE_HAS_GSTREAMER || OPENHD_GLIDE_HAS_CEDAR || OPENHD_GLIDE_HAS_RKMPP || OPENHD_GLIDE_HAS_IMXVPU)
     stop_requested = 0;
     signal(SIGINT, request_stop);
     signal(SIGTERM, request_stop);
 
-    const bool use_atomic_kms = options.atomic_kms || options.flow_overlay || options.ui_overlay;
+    const bool nxp_imx_hardware = is_nxp_imx_hardware();
+    if (options.native_imxvpu_video && !nxp_imx_hardware) {
+        glide::log(
+            glide::LogLevel::error,
+            "OpenHD-Glide",
+            "--native-imxvpu-video and its single-plane GLES fallback are restricted to detected NXP i.MX hardware");
+        return 1;
+    }
+
+    const bool single_plane_gles =
+        nxp_imx_hardware && options.native_imxvpu_video && !connected_kms_supports_nv12();
+    const bool use_atomic_kms = !single_plane_gles && (options.atomic_kms || options.flow_overlay || options.ui_overlay);
     glide::dev::KmsAtomicCompositor compositor;
     glide::dev::KmsDmabufVideoPlane legacy_output;
+    glide::dev::KmsGlesWindow single_plane_output;
+    glide::dev::DmabufGlesVideoRenderer single_plane_video;
     SharedUiBuffer shared_ui;
     auto ui_height = options.ui_height != 0 ? options.ui_height : options.flow_height;
     const auto flow_render_width = static_cast<std::uint32_t>(std::lround(static_cast<double>(options.preview_width) * options.flow_render_scale));
     const auto flow_render_height = static_cast<std::uint32_t>(std::lround(static_cast<double>(options.flow_height) * options.flow_render_scale));
-    if (use_atomic_kms) {
+    if (single_plane_gles) {
+        if (!single_plane_output.create(options.preview_width, options.flow_height, options.display_refresh_hz)) {
+            glide::log(glide::LogLevel::error, "OpenHD-Glide", single_plane_output.last_error());
+            return 1;
+        }
+        glide::log(
+            glide::LogLevel::info,
+            "OpenHD-Glide",
+            "detected NXP i.MX hardware with no KMS NV12 scanout plane; using DMA-BUF EGLImage video plus Flow/UI GLES composition on one RGB primary plane");
+    } else if (use_atomic_kms) {
         if (!compositor.create(
                 options.preview_width,
                 options.flow_height,
@@ -1093,7 +1226,9 @@ int run_kms_video_preview(const Options& options)
     std::atomic<double> video_plane_fps { 0.0 };
     std::atomic<bool> video_signal_present { false };
     std::atomic<bool> telemetry_signal_present { false };
-    auto flow_surface = use_atomic_kms ? compositor.surface_size() : glide::flow::SurfaceSize { options.preview_width, options.flow_height };
+    auto flow_surface = single_plane_gles
+        ? single_plane_output.surface_size()
+        : use_atomic_kms ? compositor.surface_size() : glide::flow::SurfaceSize { options.preview_width, options.flow_height };
     bool flow_runtime_logged {};
     bool ui_buffer_logged_ready {};
     constexpr auto ui_buffer_interval = std::chrono::milliseconds(16);
@@ -1118,11 +1253,13 @@ int run_kms_video_preview(const Options& options)
     }
     glide::mavlink::UdpBridge mavlink_bridge;
     start_mavlink_bridge(mavlink_bridge, options);
+    glide::net::DiscoveryService network_discovery;
+    start_network_discovery(network_discovery, options);
     const auto poll_control = [&]() {
         if (ipc_enabled) {
             const auto now = std::chrono::steady_clock::now();
             std::lock_guard<std::mutex> lock(mavlink_snapshot_mutex);
-            if (poll_runtime_controls(ipc_server, mavlink_bridge, control_state, mavlink_snapshot)) {
+            if (poll_runtime_controls(ipc_server, mavlink_bridge, network_discovery, control_state, mavlink_snapshot)) {
                 last_telemetry_time = now;
                 telemetry_signal_present.store(true, std::memory_order_relaxed);
             } else if (last_telemetry_time != std::chrono::steady_clock::time_point {}
@@ -1136,10 +1273,10 @@ int run_kms_video_preview(const Options& options)
         if (!flow_renderer.available()) {
             return;
         }
-        if (!use_atomic_kms) {
+        if (!use_atomic_kms && !single_plane_gles) {
             return;
         }
-        flow_surface = compositor.surface_size();
+        flow_surface = single_plane_gles ? single_plane_output.surface_size() : compositor.surface_size();
         if (!flow_runtime_logged) {
             glide::log(glide::LogLevel::info, "OpenHD-Glide", flow_renderer.runtime_description());
             if (flow_renderer.likely_software_renderer()) {
@@ -1150,7 +1287,9 @@ int run_kms_video_preview(const Options& options)
             flow_runtime_logged = true;
         }
 
-        flow_renderer.clear(0.0F, 0.0F, 0.0F, 0.0F, flow_surface);
+        if (!single_plane_gles) {
+            flow_renderer.clear(0.0F, 0.0F, 0.0F, 0.0F, flow_surface);
+        }
         if (options.flow_debug_solid) {
             flow_renderer.draw_filled_quad(
                 { 0.0F, 0.0F },
@@ -1217,7 +1356,7 @@ int run_kms_video_preview(const Options& options)
             }
             const auto now = std::chrono::steady_clock::now();
             const bool update_ui_buffer = now >= next_ui_buffer_upload;
-            if (compositor.ui_overlay_plane_active()) {
+            if (!single_plane_gles && compositor.ui_overlay_plane_active()) {
                 if (update_ui_buffer && !compositor.publish_ui_frame_from_argb(shared_ui.map, options.ui_width, ui_height, options.ui_width * 4U)) {
                     glide::log(glide::LogLevel::warning, "OpenHD-Glide", compositor.last_error());
                 }
@@ -1261,11 +1400,27 @@ int run_kms_video_preview(const Options& options)
     };
 
     const auto present_waiting_overlay_frame = [&](bool update_flow, bool force) {
-        if (!use_atomic_kms || (!options.flow_overlay && !options.ui_overlay)) {
+        if (!use_atomic_kms && !single_plane_gles) {
             return true;
         }
         const auto now = std::chrono::steady_clock::now();
         if (!force && options.flow_fps > 0.0 && now < next_flow_frame) {
+            return true;
+        }
+        if (single_plane_gles) {
+            flow_renderer.clear(0.0F, 0.0F, 0.0F, 1.0F, flow_surface);
+            if (update_flow && (options.flow_overlay || options.ui_overlay)) {
+                render_flow_overlay();
+            }
+            single_plane_output.swap();
+            if (!single_plane_output.last_error().empty()) {
+                glide::log(glide::LogLevel::error, "OpenHD-Glide", single_plane_output.last_error());
+                return false;
+            }
+            update_flow_deadline();
+            return true;
+        }
+        if (!options.flow_overlay && !options.ui_overlay) {
             return true;
         }
         if (update_flow) {
@@ -1280,7 +1435,7 @@ int run_kms_video_preview(const Options& options)
     };
 
     const auto maybe_present_waiting_overlay = [&]() {
-        if (!use_atomic_kms || (!options.flow_overlay && !options.ui_overlay)) {
+        if (!use_atomic_kms && !single_plane_gles) {
             return true;
         }
         const auto now = std::chrono::steady_clock::now();
@@ -1547,6 +1702,24 @@ int run_kms_video_preview(const Options& options)
     }
 
     const auto present_video_frame = [&](const glide::dev::DmabufVideoFrame& frame, std::uint64_t presented_frames) {
+        if (single_plane_gles) {
+            if (!single_plane_video.draw(frame, flow_surface)) {
+                glide::log(glide::LogLevel::error, "OpenHD-Glide", single_plane_video.last_error());
+                return false;
+            }
+            if (options.flow_overlay || options.ui_overlay) {
+                render_flow_overlay();
+            }
+            single_plane_output.swap();
+            if (!single_plane_output.last_error().empty()) {
+                glide::log(glide::LogLevel::error, "OpenHD-Glide", single_plane_output.last_error());
+                return false;
+            }
+            video_signal_present.store(true, std::memory_order_relaxed);
+            last_video_frame_time = std::chrono::steady_clock::now();
+            update_flow_deadline();
+            return true;
+        }
         if (!use_atomic_kms) {
             if (!legacy_output.present(frame)) {
                 glide::log(glide::LogLevel::error, "OpenHD-Glide", legacy_output.last_error());
@@ -1579,6 +1752,10 @@ int run_kms_video_preview(const Options& options)
     };
 
     const auto present_cpu_video_frame = [&](const glide::dev::CpuVideoFrame& frame, std::uint64_t presented_frames) {
+        if (single_plane_gles) {
+            glide::log(glide::LogLevel::error, "OpenHD-Glide", "single-plane DMA-BUF GLES composition does not accept CPU video frames");
+            return false;
+        }
         if (!use_atomic_kms) {
             if (!legacy_output.present(frame)) {
                 glide::log(glide::LogLevel::error, "OpenHD-Glide", legacy_output.last_error());
@@ -1675,6 +1852,83 @@ int run_kms_video_preview(const Options& options)
     }
 #endif
 
+#if OPENHD_GLIDE_HAS_IMXVPU
+    if (options.native_imxvpu_video) {
+        glide::video::ImxVpuRtpDecoder imxvpu;
+        if (!imxvpu.start(options.view_udp_port, options.view_udp_codec)) {
+            glide::log(glide::LogLevel::error, "OpenHD-Glide", imxvpu.last_error());
+            return 1;
+        }
+
+        glide::log(
+            glide::LogLevel::info,
+            "OpenHD-Glide",
+            "native NXP i.MX VPU API 2 RTP/" + options.view_udp_codec + " decoder running without GStreamer");
+        glide::log(
+            glide::LogLevel::info,
+            "OpenHD-Glide",
+            single_plane_gles
+                ? "single-plane GLES video+Flow+UI compositor running"
+                : use_atomic_kms ? "atomic KMS video+Flow compositor running" : "fast legacy KMS video plane running");
+
+        std::uint64_t frames {};
+        std::uint64_t frames_since_log {};
+        auto last_log = std::chrono::steady_clock::now();
+        auto last_waiting_log = last_log;
+        while (stop_requested == 0) {
+            poll_control();
+            glide::dev::DmabufVideoFrame frame;
+            if (!imxvpu.poll(frame)) {
+                if (!imxvpu.last_error().empty()) {
+                    glide::log(glide::LogLevel::error, "OpenHD-Glide", imxvpu.last_error());
+                    return 1;
+                }
+                if (!maybe_present_waiting_overlay()) {
+                    return 1;
+                }
+                const auto now = std::chrono::steady_clock::now();
+                if (now - last_waiting_log >= std::chrono::seconds(1)) {
+                    glide::log(glide::LogLevel::info, "OpenHD-Glide", "waiting for native i.MX VPU decoded frame " + imxvpu.stats());
+                    last_waiting_log = now;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                continue;
+            }
+
+            if (!present_video_frame(frame, frames)) {
+                return 1;
+            }
+            imxvpu.mark_presented();
+            ++frames;
+            ++frames_since_log;
+
+            const auto now = std::chrono::steady_clock::now();
+            if (now - last_log >= std::chrono::seconds(1)) {
+                const auto elapsed = std::chrono::duration<double>(now - last_log).count();
+                const auto current_fps = static_cast<double>(frames_since_log) / elapsed;
+                video_plane_fps.store(current_fps);
+                std::ostringstream status;
+                status.setf(std::ios::fixed);
+                status.precision(1);
+                status << "native NXP i.MX VPU "
+                       << (single_plane_gles ? "single-plane GLES composition" : use_atomic_kms ? "atomic video+Flow" : "legacy video")
+                       << " fps=" << current_fps
+                       << " total_frames=" << frames
+                       << ' ' << imxvpu.stats();
+                glide::log(glide::LogLevel::info, "OpenHD-Glide", status.str());
+                frames_since_log = 0;
+                last_log = now;
+            }
+        }
+        return 0;
+    }
+#else
+    if (options.native_imxvpu_video) {
+        glide::log(glide::LogLevel::error, "OpenHD-Glide", "native NXP i.MX VPU decoder support was not found at build time");
+        return 1;
+    }
+#endif
+
 #if OPENHD_GLIDE_HAS_RKMPP
     if (options.native_rkmpp_video) {
         glide::video::RockchipMppRtpDecoder rkmpp;
@@ -1699,6 +1953,7 @@ int run_kms_video_preview(const Options& options)
             double present_interval_min_ms { 1000000.0 };
             double present_interval_max_ms {};
             std::uint64_t present_intervals_since_log {};
+            auto last_waiting_log = std::chrono::steady_clock::now();
             int result {};
 
             glide::log(glide::LogLevel::info, "OpenHD-Glide", "RKMPP presenter thread owns decoder dequeue and KMS page-flip cadence");
@@ -1715,6 +1970,11 @@ int run_kms_video_preview(const Options& options)
                         result = 1;
                         stop_requested = 1;
                         break;
+                    }
+                    const auto now = std::chrono::steady_clock::now();
+                    if (now - last_waiting_log >= std::chrono::seconds(1)) {
+                        glide::log(glide::LogLevel::info, "OpenHD-Glide", "waiting for native RKMPP decoded frame " + rkmpp.stats());
+                        last_waiting_log = now;
                     }
                     std::this_thread::sleep_for(std::chrono::milliseconds(1));
                     continue;
@@ -2216,7 +2476,7 @@ int run_kms_video_preview(const Options& options)
 #endif
 #else
     (void)options;
-    glide::log(glide::LogLevel::error, "OpenHD-Glide", "--kms-video-preview requires device KMS plus native Cedar or GStreamer support");
+    glide::log(glide::LogLevel::error, "OpenHD-Glide", "--kms-video-preview requires device KMS plus native i.MX VPU, RKMPP, Cedar, or GStreamer support");
     return 1;
 #endif
 }
@@ -2233,9 +2493,32 @@ void start_mavlink_bridge(glide::mavlink::UdpBridge& bridge, const Options& opti
     }
 }
 
+void start_network_discovery(glide::net::DiscoveryService& discovery, const Options& options)
+{
+    if (discovery.start(glide::net::DiscoveryOptions {
+            .discovery_udp_port = glide::net::discovery_port,
+            .video_udp_port = options.view_udp_port,
+            .role = "glide",
+        })) {
+        glide::log(
+            glide::LogLevel::info,
+            "OpenHD-Glide",
+            "Ethernet Glide discovery listening on UDP/0.0.0.0:" + std::to_string(glide::net::discovery_port));
+    } else {
+        glide::log(glide::LogLevel::warning, "OpenHD-Glide", "Ethernet discovery disabled: " + discovery.last_error());
+    }
+}
+
 void broadcast_mavlink_updates(glide::mavlink::UdpBridge& bridge, glide::ipc::Server& ipc_server)
 {
     for (const auto& line : bridge.poll()) {
+        ipc_server.broadcast_line(line);
+    }
+}
+
+void broadcast_network_updates(glide::net::DiscoveryService& discovery, glide::ipc::Server& ipc_server)
+{
+    for (const auto& line : discovery.poll_state_lines()) {
         ipc_server.broadcast_line(line);
     }
 }
@@ -2290,6 +2573,8 @@ int run_preview_stack(char* argv0, const Options& options)
     }
     glide::mavlink::UdpBridge mavlink_bridge;
     start_mavlink_bridge(mavlink_bridge, options);
+    glide::net::DiscoveryService network_discovery;
+    start_network_discovery(network_discovery, options);
 
     glide::log(glide::LogLevel::info, "OpenHD-Glide", "starting WSL preview stack");
     const auto view_pid = launch_child(video_args);
@@ -2332,6 +2617,7 @@ int run_preview_stack(char* argv0, const Options& options)
 
     while (stop_requested == 0) {
         broadcast_mavlink_updates(mavlink_bridge, ipc_server);
+        broadcast_network_updates(network_discovery, ipc_server);
         for (const auto& event : ipc_server.poll()) {
             std::cout << "ipc[" << event.client_id << "] " << event.line << '\n';
             if (event.line.rfind("hello ", 0) == 0) {
@@ -2341,6 +2627,7 @@ int run_preview_stack(char* argv0, const Options& options)
                 ipc_server.send_line(event.client_id, std::string("state topbar ") + (top_bar_enabled ? "1" : "0"));
                 ipc_server.send_line(event.client_id, "state osd " + osd_layout);
                 send_theme_state(ipc_server, event.client_id);
+                send_network_state(ipc_server, event.client_id, network_discovery);
             } else if (event.line == "get fps") {
                 ipc_server.send_line(event.client_id, std::string("state fps ") + (fps_enabled ? "1" : "0"));
             } else if (event.line == "get coords") {
@@ -2353,6 +2640,7 @@ int run_preview_stack(char* argv0, const Options& options)
                 ipc_server.send_line(event.client_id, "state osd " + osd_layout);
             } else if (event.line == "get theme") {
                 send_theme_state(ipc_server, event.client_id);
+            } else if (handle_network_line(event.line, ipc_server, event.client_id, network_discovery)) {
             } else if (event.line == "set fps 0" || event.line == "set fps 1") {
                 fps_enabled = event.line.back() == '1';
                 glide::preview_control::set_fps_overlay_enabled(fps_enabled);
@@ -2442,6 +2730,8 @@ int run_kms_stack(char* argv0, const Options& options)
     }
     glide::mavlink::UdpBridge mavlink_bridge;
     start_mavlink_bridge(mavlink_bridge, options);
+    glide::net::DiscoveryService network_discovery;
+    start_network_discovery(network_discovery, options);
 
     glide::log(glide::LogLevel::info, "OpenHD-Glide", "starting device DRM/KMS stack");
     const auto view_pid = launch_child(video_args);
@@ -2497,6 +2787,7 @@ int run_kms_stack(char* argv0, const Options& options)
 
     while (stop_requested == 0) {
         broadcast_mavlink_updates(mavlink_bridge, ipc_server);
+        broadcast_network_updates(network_discovery, ipc_server);
         for (const auto& event : ipc_server.poll()) {
             std::cout << "ipc[" << event.client_id << "] " << event.line << '\n';
             if (event.line.rfind("hello ", 0) == 0) {
@@ -2506,6 +2797,7 @@ int run_kms_stack(char* argv0, const Options& options)
                 ipc_server.send_line(event.client_id, std::string("state topbar ") + (top_bar_enabled ? "1" : "0"));
                 ipc_server.send_line(event.client_id, "state osd " + osd_layout);
                 send_theme_state(ipc_server, event.client_id);
+                send_network_state(ipc_server, event.client_id, network_discovery);
             } else if (event.line == "get fps") {
                 ipc_server.send_line(event.client_id, std::string("state fps ") + (fps_enabled ? "1" : "0"));
             } else if (event.line == "get coords") {
@@ -2518,6 +2810,7 @@ int run_kms_stack(char* argv0, const Options& options)
                 ipc_server.send_line(event.client_id, "state osd " + osd_layout);
             } else if (event.line == "get theme") {
                 send_theme_state(ipc_server, event.client_id);
+            } else if (handle_network_line(event.line, ipc_server, event.client_id, network_discovery)) {
             } else if (event.line == "set fps 0" || event.line == "set fps 1") {
                 fps_enabled = event.line.back() == '1';
                 glide::preview_control::set_fps_overlay_enabled(fps_enabled);
@@ -2592,6 +2885,26 @@ int run_kms_stack(char*, const Options&)
 int main(int argc, char** argv)
 {
     const auto options = parse_options(argc, argv);
+    if (options.ethernet_p2p) {
+        const auto result = glide::net::configure_point_to_point(glide::net::PointToPointOptions {
+            .interface_name = options.ethernet_p2p_interface,
+            .role = options.ethernet_p2p_role,
+        });
+        std::cout << result << '\n';
+        return result.rfind("ok ", 0) == 0 ? 0 : 1;
+    }
+    if (options.ethernet_discover) {
+        const auto peers = glide::net::scan_blocking(glide::net::discovery_port, options.view_udp_port);
+        if (peers.empty()) {
+            std::cout << "no Glide peers found on the current subnet\n";
+            return 1;
+        }
+        for (const auto& peer : peers) {
+            std::cout << peer.hostname << " " << peer.address << ":" << peer.video_port << '\n';
+        }
+        return 0;
+    }
+
     glide::log(glide::LogLevel::info, "OpenHD-Glide", "starting hardware discovery");
 
     const auto drm = glide::platform::probe_drm_planes();

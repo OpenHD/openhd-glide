@@ -58,6 +58,7 @@ struct Options {
     std::optional<int> connector_id;
     bool stay_alive {};
     bool udp_video {};
+    bool display {};
     std::string udp_codec { "h264" };
 };
 
@@ -71,6 +72,9 @@ Options parse_options(int argc, char** argv)
         } else if (argument == "--stay-alive") {
             options.stay_alive = true;
         } else if (argument == "--udp-video") {
+            options.udp_video = true;
+        } else if (argument == "--display") {
+            options.display = true;
             options.udp_video = true;
         } else if (argument == "--udp-codec" && i + 1 < argc) {
             options.udp_codec = argv[++i];
@@ -224,7 +228,7 @@ public:
         gst_init(nullptr, nullptr);
 
         if (options.plane_id || options.connector_id) {
-            glide::log(glide::LogLevel::warning, "GlideView", "plane/connector ids are ignored in decode-only mode; openhd-glide must own KMS");
+            glide::log(glide::LogLevel::warning, "GlideView", "plane/connector ids are ignored; openhd-glide must own KMS");
         }
 
         pipeline_ = gst_pipeline_new("openhd-glide-view");
@@ -248,11 +252,12 @@ public:
         auto* input_queue = make_element("queue", "input-queue");
         auto* decoder = make_decoder(use_mjpeg ? "mjpeg" : (use_h265 ? "h265" : "h264"));
         auto* output_queue = make_element("queue", "output-queue");
-        auto* sink = make_element("appsink", "decoded-frame-sink");
+        auto* converter = options.display ? make_element("videoconvert", "display-convert") : nullptr;
+        auto* sink = make_element(options.display ? "autovideosink" : "appsink", options.display ? "video-output" : "decoded-frame-sink");
 
         if (pipeline_ == nullptr || source == nullptr || capsfilter == nullptr || depay == nullptr || parse == nullptr
             || video_capsfilter == nullptr || input_queue == nullptr || decoder == nullptr || output_queue == nullptr
-            || sink == nullptr) {
+            || (options.display && converter == nullptr) || sink == nullptr) {
             stop();
             return false;
         }
@@ -266,6 +271,10 @@ public:
         if (auto* parse_pad = gst_element_get_static_pad(video_capsfilter, "src"); parse_pad != nullptr) {
             parsed_probe_id_ = gst_pad_add_probe(parse_pad, GST_PAD_PROBE_TYPE_BUFFER, &VideoPipeline::parsed_probe, this, nullptr);
             gst_object_unref(parse_pad);
+        }
+        if (auto* output_pad = gst_element_get_static_pad(output_queue, "src"); output_pad != nullptr) {
+            decoded_probe_id_ = gst_pad_add_probe(output_pad, GST_PAD_PROBE_TYPE_BUFFER, &VideoPipeline::decoded_probe, this, nullptr);
+            gst_object_unref(output_pad);
         }
 
         auto* caps = gst_caps_new_simple(
@@ -288,7 +297,7 @@ public:
 
         set_int_property_if_present(parse, "config-interval", -1);
         auto* video_caps = use_mjpeg
-            ? gst_caps_new_simple("image/jpeg", nullptr)
+            ? gst_caps_new_empty_simple("image/jpeg")
             : gst_caps_new_simple(
                 use_h265 ? "video/x-h265" : "video/x-h264",
                 "stream-format",
@@ -316,9 +325,11 @@ public:
         set_bool_property_if_present(sink, "sync", false);
         set_bool_property_if_present(sink, "async", false);
         set_bool_property_if_present(sink, "qos", false);
-        set_bool_property_if_present(sink, "drop", true);
-        set_bool_property_if_present(sink, "emit-signals", false);
-        set_int_property_if_present(sink, "max-buffers", 8);
+        if (!options.display) {
+            set_bool_property_if_present(sink, "drop", true);
+            set_bool_property_if_present(sink, "emit-signals", false);
+            set_int_property_if_present(sink, "max-buffers", 8);
+        }
 
         gst_bin_add_many(
             GST_BIN(pipeline_),
@@ -330,10 +341,27 @@ public:
             input_queue,
             decoder,
             output_queue,
-            sink,
             nullptr);
+        if (options.display) {
+            gst_bin_add_many(GST_BIN(pipeline_), converter, sink, nullptr);
+        } else {
+            gst_bin_add(GST_BIN(pipeline_), sink);
+        }
 
-        if (!gst_element_link_many(
+        const bool linked = options.display
+            ? gst_element_link_many(
+                source,
+                capsfilter,
+                depay,
+                parse,
+                video_capsfilter,
+                input_queue,
+                decoder,
+                output_queue,
+                converter,
+                sink,
+                nullptr)
+            : gst_element_link_many(
                 source,
                 capsfilter,
                 depay,
@@ -343,13 +371,17 @@ public:
                 decoder,
                 output_queue,
                 sink,
-                nullptr)) {
+                nullptr);
+        if (!linked) {
             glide::log(glide::LogLevel::error, "GlideView", "failed to link GStreamer UDP decode pipeline");
             stop();
             return false;
         }
 
-        sink_ = sink;
+        display_ = options.display;
+        if (!display_) {
+            sink_ = sink;
+        }
         bus_ = gst_element_get_bus(pipeline_);
         const auto result = gst_element_set_state(pipeline_, GST_STATE_PLAYING);
         if (result == GST_STATE_CHANGE_FAILURE) {
@@ -360,12 +392,16 @@ public:
 
         std::ostringstream status;
         status << "UDP RTP/" << (use_mjpeg ? "MJPEG" : (use_h265 ? "H265" : "H264")) << " decode listening on 0.0.0.0:" << options.udp_port
-               << " output=appsink";
+               << " output=" << (options.display ? "autovideosink" : "appsink");
         glide::log(glide::LogLevel::info, "GlideView", status.str());
-        glide::log(
-            glide::LogLevel::warning,
-            "GlideView",
-            "decode-only mode does not display video; openhd-glide must import decoded buffers and own KMS");
+        if (options.display) {
+            glide::log(glide::LogLevel::info, "GlideView", "display mode enabled; using GStreamer desktop video sink");
+        } else {
+            glide::log(
+                glide::LogLevel::warning,
+                "GlideView",
+                "decode-only mode does not display video; openhd-glide must import decoded buffers and own KMS");
+        }
         return true;
     }
 
@@ -374,7 +410,10 @@ public:
         if (!poll_bus()) {
             return false;
         }
-        pull_samples();
+        if (!display_) {
+            pull_samples();
+        }
+        log_stats();
         return true;
     }
 
@@ -444,13 +483,15 @@ private:
                 logged_first_sample_ = true;
             }
 
-            ++frames_;
-            ++frames_since_log_;
             gst_sample_unref(sample);
         }
+    }
 
+    void log_stats()
+    {
         const auto now = std::chrono::steady_clock::now();
-        if (frames_ == 0 && now - last_waiting_log_ >= std::chrono::seconds(3)) {
+        const auto frames = decoded_frames_.load(std::memory_order_relaxed);
+        if (frames == 0 && now - last_waiting_log_ >= std::chrono::seconds(3)) {
             const auto packets = source_packets_.load();
             const auto bytes = source_bytes_.load();
             if (packets == 0) {
@@ -475,21 +516,21 @@ private:
         }
         if (now - last_fps_log_ >= std::chrono::seconds(1)) {
             const auto elapsed = std::chrono::duration<double>(now - last_fps_log_).count();
-            const auto fps = static_cast<double>(frames_since_log_) / elapsed;
-            if (frames_ > 0) {
+            const auto fps = static_cast<double>(frames - logged_decoded_frames_) / elapsed;
+            if (frames > 0) {
                 std::ostringstream stream;
                 stream.setf(std::ios::fixed);
                 stream.precision(1);
                 const auto parsed_frames = parsed_frames_.load(std::memory_order_relaxed);
                 const auto parsed_fps = static_cast<double>(parsed_frames - logged_parsed_frames_) / elapsed;
                 logged_parsed_frames_ = parsed_frames;
+                logged_decoded_frames_ = frames;
                 stream << "decoded fps=" << fps
                        << " parsed_au_fps=" << parsed_fps
-                       << " total_frames=" << frames_
+                       << " total_frames=" << frames
                        << " total_parsed_au=" << parsed_frames;
                 glide::log(glide::LogLevel::info, "GlideView", stream.str());
             }
-            frames_since_log_ = 0;
             last_fps_log_ = now;
         }
     }
@@ -516,6 +557,16 @@ private:
             }
             parsed_probe_id_ = 0;
         }
+        if (pipeline_ != nullptr && decoded_probe_id_ != 0) {
+            if (auto* output_queue = gst_bin_get_by_name(GST_BIN(pipeline_), "output-queue"); output_queue != nullptr) {
+                if (auto* output_pad = gst_element_get_static_pad(output_queue, "src"); output_pad != nullptr) {
+                    gst_pad_remove_probe(output_pad, decoded_probe_id_);
+                    gst_object_unref(output_pad);
+                }
+                gst_object_unref(output_queue);
+            }
+            decoded_probe_id_ = 0;
+        }
         if (pipeline_ != nullptr) {
             gst_element_set_state(pipeline_, GST_STATE_NULL);
         }
@@ -535,14 +586,16 @@ private:
     GstBus* bus_ {};
     gulong source_probe_id_ {};
     gulong parsed_probe_id_ {};
+    gulong decoded_probe_id_ {};
+    bool display_ {};
     bool logged_first_sample_ {};
-    std::uint64_t frames_ {};
-    std::uint64_t frames_since_log_ {};
     std::uint64_t logged_source_packets_ {};
     std::uint64_t logged_parsed_frames_ {};
+    std::uint64_t logged_decoded_frames_ {};
     std::atomic<std::uint64_t> source_packets_ {};
     std::atomic<std::uint64_t> source_bytes_ {};
     std::atomic<std::uint64_t> parsed_frames_ {};
+    std::atomic<std::uint64_t> decoded_frames_ {};
     std::chrono::steady_clock::time_point last_fps_log_ { std::chrono::steady_clock::now() };
     std::chrono::steady_clock::time_point last_packet_log_ { std::chrono::steady_clock::now() };
     std::chrono::steady_clock::time_point last_waiting_log_ { std::chrono::steady_clock::now() };
@@ -562,6 +615,15 @@ private:
         auto* self = static_cast<VideoPipeline*>(user_data);
         if (gst_pad_probe_info_get_buffer(info) != nullptr) {
             self->parsed_frames_.fetch_add(1, std::memory_order_relaxed);
+        }
+        return GST_PAD_PROBE_OK;
+    }
+
+    static GstPadProbeReturn decoded_probe(GstPad*, GstPadProbeInfo* info, gpointer user_data)
+    {
+        auto* self = static_cast<VideoPipeline*>(user_data);
+        if (gst_pad_probe_info_get_buffer(info) != nullptr) {
+            self->decoded_frames_.fetch_add(1, std::memory_order_relaxed);
         }
         return GST_PAD_PROBE_OK;
     }
