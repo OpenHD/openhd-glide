@@ -1074,7 +1074,7 @@ struct SharedUiBuffer {
 
 int run_kms_video_preview(const Options& options)
 {
-#if OPENHD_GLIDE_DEVICE_KMS && (OPENHD_GLIDE_HAS_GSTREAMER || OPENHD_GLIDE_HAS_CEDAR || OPENHD_GLIDE_HAS_RKMPP)
+#if OPENHD_GLIDE_DEVICE_KMS && (OPENHD_GLIDE_HAS_GSTREAMER || OPENHD_GLIDE_HAS_CEDAR || OPENHD_GLIDE_HAS_RKMPP || OPENHD_GLIDE_HAS_IMXVPU)
     stop_requested = 0;
     signal(SIGINT, request_stop);
     signal(SIGTERM, request_stop);
