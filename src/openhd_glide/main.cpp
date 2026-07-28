@@ -88,6 +88,28 @@ namespace {
 
 volatile std::sig_atomic_t stop_requested = 0;
 
+bool is_nxp_imx_hardware()
+{
+#if defined(__linux__)
+    const int fd = open("/proc/device-tree/compatible", O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        return false;
+    }
+
+    std::array<char, 4096> compatible {};
+    const auto bytes_read = read(fd, compatible.data(), compatible.size());
+    close(fd);
+    if (bytes_read <= 0) {
+        return false;
+    }
+
+    const std::string device_compatibility(compatible.data(), static_cast<std::size_t>(bytes_read));
+    return device_compatibility.find("fsl,imx") != std::string::npos;
+#else
+    return false;
+#endif
+}
+
 bool connected_kms_supports_nv12()
 {
 #if OPENHD_GLIDE_HAS_KMS_GBM
@@ -1103,7 +1125,17 @@ int run_kms_video_preview(const Options& options)
     signal(SIGINT, request_stop);
     signal(SIGTERM, request_stop);
 
-    const bool single_plane_gles = options.native_imxvpu_video && !connected_kms_supports_nv12();
+    const bool nxp_imx_hardware = is_nxp_imx_hardware();
+    if (options.native_imxvpu_video && !nxp_imx_hardware) {
+        glide::log(
+            glide::LogLevel::error,
+            "OpenHD-Glide",
+            "--native-imxvpu-video and its single-plane GLES fallback are restricted to detected NXP i.MX hardware");
+        return 1;
+    }
+
+    const bool single_plane_gles =
+        nxp_imx_hardware && options.native_imxvpu_video && !connected_kms_supports_nv12();
     const bool use_atomic_kms = !single_plane_gles && (options.atomic_kms || options.flow_overlay || options.ui_overlay);
     glide::dev::KmsAtomicCompositor compositor;
     glide::dev::KmsDmabufVideoPlane legacy_output;
@@ -1121,7 +1153,7 @@ int run_kms_video_preview(const Options& options)
         glide::log(
             glide::LogLevel::info,
             "OpenHD-Glide",
-            "KMS exposes no NV12 scanout plane; using DMA-BUF EGLImage video plus Flow/UI GLES composition on one RGB primary plane");
+            "detected NXP i.MX hardware with no KMS NV12 scanout plane; using DMA-BUF EGLImage video plus Flow/UI GLES composition on one RGB primary plane");
     } else if (use_atomic_kms) {
         if (!compositor.create(
                 options.preview_width,
