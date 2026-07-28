@@ -256,6 +256,19 @@ Flow, and LVGL with GLES into one RGB primary surface. The native i.MX VPU mode
 and this fallback are rejected on non-NXP hardware. The i.MX launcher defaults
 display and Flow cadence to 60 Hz/fps; override `GLIDE_DISPLAY_HZ` or
 `GLIDE_FLOW_FPS` when required.
+
+On the ORQA i.MX8MP board, `/dev/video3` is a 960x720 source. All three media
+pads must use that width; 944x720 truncates every CSI line and produces green or
+mangled frames. The hardware camera/encoder test sender configures the pads and
+streams RTP/H.264 at 60 fps:
+
+```bash
+examples/stream-orqa-video3-to-glide.sh 127.0.0.1 5600
+```
+
+This script is NXP-gated and uses GStreamer only as an external camera test
+sender. Glide still performs native `libimxvpuapi2` decoding and direct
+DMA-BUF/EGL composition without GStreamer.
 On Raspberry Pi, start with the GStreamer path and the real KMS driver (`vc4-kms-v3d`). Raspberry Pi 5
 images should not be treated as H.264 hardware decode/encode targets; the current practical bring-up path is
 RTP/MJPEG in video-only KMS mode, where Glide decodes JPEG in software, copies BGRx into a DRM dumb buffer,

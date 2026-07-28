@@ -48,6 +48,8 @@ private:
         std::uint32_t strides[4] {};
         std::uint32_t offsets[4] {};
         std::uint64_t modifiers[4] {};
+        DmabufYuvColorSpace yuv_color_space { DmabufYuvColorSpace::unspecified };
+        DmabufYuvRange yuv_range { DmabufYuvRange::unspecified };
     };
 
     struct CachedImage {

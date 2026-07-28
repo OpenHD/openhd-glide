@@ -30,6 +30,19 @@
 
 namespace glide::dev {
 
+enum class DmabufYuvColorSpace : std::uint8_t {
+    unspecified,
+    rec601,
+    rec709,
+    rec2020,
+};
+
+enum class DmabufYuvRange : std::uint8_t {
+    unspecified,
+    narrow,
+    full,
+};
+
 struct DmabufVideoFrame {
     std::uint32_t width {};
     std::uint32_t height {};
@@ -39,6 +52,8 @@ struct DmabufVideoFrame {
     std::array<std::uint32_t, 4> strides {};
     std::array<std::uint32_t, 4> offsets {};
     std::array<std::uint64_t, 4> modifiers {};
+    DmabufYuvColorSpace yuv_color_space { DmabufYuvColorSpace::unspecified };
+    DmabufYuvRange yuv_range { DmabufYuvRange::unspecified };
 };
 
 struct CpuVideoFrame {

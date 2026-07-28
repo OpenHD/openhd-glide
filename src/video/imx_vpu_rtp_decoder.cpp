@@ -32,6 +32,7 @@ extern "C" {
 #include <array>
 #include <cerrno>
 #include <cstring>
+#include <sstream>
 #endif
 
 namespace glide::video {
@@ -114,7 +115,8 @@ std::string ImxVpuRtpDecoder::stats() const
         + " access_units=" + std::to_string(access_units_)
         + " decoded_frames=" + std::to_string(decoded_frames_)
         + " skipped_frames=" + std::to_string(skipped_frames_)
-        + " dropped_frames=" + std::to_string(dropped_frames_);
+        + " dropped_frames=" + std::to_string(dropped_frames_)
+        + (output_description_.empty() ? std::string {} : " " + output_description_);
 #else
     return {};
 #endif
@@ -200,7 +202,9 @@ bool ImxVpuRtpDecoder::init_decoder(const std::string& codec)
     ImxVpuApiDecOpenParams params {};
     params.compression_format = h265_ ? IMX_VPU_API_COMPRESSION_FORMAT_H265 : IMX_VPU_API_COMPRESSION_FORMAT_H264;
     params.flags = IMX_VPU_API_DEC_OPEN_PARAMS_FLAG_ENABLE_FRAME_REORDERING
-        | IMX_VPU_API_DEC_OPEN_PARAMS_FLAG_USE_SEMI_PLANAR_COLOR_FORMAT;
+        | IMX_VPU_API_DEC_OPEN_PARAMS_FLAG_USE_SEMI_PLANAR_COLOR_FORMAT
+        | IMX_VPU_API_DEC_OPEN_PARAMS_FLAG_USE_SUGGESTED_COLOR_FORMAT;
+    params.suggested_color_format = IMX_VPU_API_COLOR_FORMAT_SEMI_PLANAR_YUV420_8BIT;
     const auto result = imx_vpu_api_dec_open(&decoder_, &params, stream_buffer_);
     if (result != IMX_VPU_API_DEC_RETURN_CODE_OK) {
         last_error_ = decoder_error("failed to open native i.MX VPU decoder", result);
@@ -487,9 +491,9 @@ bool ImxVpuRtpDecoder::update_stream_info()
         last_error_ = "i.MX VPU returned no stream information";
         return false;
     }
-    if (!(info->flags & IMX_VPU_API_DEC_STREAM_INFO_FLAG_SEMI_PLANAR_FRAMES)
-        || (info->flags & IMX_VPU_API_DEC_STREAM_INFO_FLAG_10BIT)) {
-        last_error_ = "i.MX VPU output is not 8-bit semi-planar NV12";
+    if (info->color_format != IMX_VPU_API_COLOR_FORMAT_SEMI_PLANAR_YUV420_8BIT) {
+        last_error_ = std::string("i.MX VPU output cannot be imported as linear NV12: ")
+            + imx_vpu_api_color_format_string(info->color_format);
         return false;
     }
 
@@ -502,6 +506,42 @@ bool ImxVpuRtpDecoder::update_stream_info()
     uv_stride_ = static_cast<std::uint32_t>(metrics.uv_stride);
     y_offset_ = static_cast<std::uint32_t>(metrics.y_offset);
     uv_offset_ = static_cast<std::uint32_t>(metrics.u_offset);
+
+    yuv_color_space_ = glide::dev::DmabufYuvColorSpace::unspecified;
+    if (info->flags & IMX_VPU_API_DEC_STREAM_INFO_FLAG_COLOR_DESCRIPTION_AVAILABLE) {
+        switch (info->color_description.matrix_coefficients) {
+        case 1:
+            yuv_color_space_ = glide::dev::DmabufYuvColorSpace::rec709;
+            break;
+        case 5:
+        case 6:
+            yuv_color_space_ = glide::dev::DmabufYuvColorSpace::rec601;
+            break;
+        case 9:
+        case 10:
+            yuv_color_space_ = glide::dev::DmabufYuvColorSpace::rec2020;
+            break;
+        default:
+            break;
+        }
+    }
+    yuv_range_ = info->video_full_range_flag
+        ? glide::dev::DmabufYuvRange::full
+        : glide::dev::DmabufYuvRange::narrow;
+
+    const auto color_space_name =
+        yuv_color_space_ == glide::dev::DmabufYuvColorSpace::rec601 ? "bt601"
+        : yuv_color_space_ == glide::dev::DmabufYuvColorSpace::rec709 ? "bt709"
+        : yuv_color_space_ == glide::dev::DmabufYuvColorSpace::rec2020 ? "bt2020"
+                                                                      : "unspecified";
+    std::ostringstream output;
+    output << "output=linear-nv12"
+           << " size=" << width_ << 'x' << height_
+           << " strides=" << y_stride_ << '/' << uv_stride_
+           << " offsets=" << y_offset_ << '/' << uv_offset_
+           << " color=" << color_space_name
+           << " range=" << (yuv_range_ == glide::dev::DmabufYuvRange::full ? "full" : "narrow");
+    output_description_ = output.str();
     return add_framebuffers(info->min_num_required_framebuffers);
 }
 
@@ -565,6 +605,8 @@ bool ImxVpuRtpDecoder::deliver_ready_frame(glide::dev::DmabufVideoFrame& frame)
     frame.strides[1] = uv_stride_;
     frame.offsets[0] = y_offset_;
     frame.offsets[1] = uv_offset_;
+    frame.yuv_color_space = yuv_color_space_;
+    frame.yuv_range = yuv_range_;
     return true;
 }
 

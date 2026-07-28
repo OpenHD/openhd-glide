@@ -282,6 +282,8 @@ bool DmabufGlesVideoRenderer::make_key(const DmabufVideoFrame& frame, ImageKey& 
     key.height = frame.height;
     key.format = frame.drm_format;
     key.plane_count = frame.plane_count;
+    key.yuv_color_space = frame.yuv_color_space;
+    key.yuv_range = frame.yuv_range;
     for (std::uint32_t plane = 0; plane < frame.plane_count; ++plane) {
         key.strides[plane] = frame.strides[plane];
         key.offsets[plane] = frame.offsets[plane];
@@ -302,7 +304,9 @@ DmabufGlesVideoRenderer::CachedImage* DmabufGlesVideoRenderer::find_or_import(co
             && cached.key.width == key.width
             && cached.key.height == key.height
             && cached.key.format == key.format
-            && cached.key.plane_count == key.plane_count;
+            && cached.key.plane_count == key.plane_count
+            && cached.key.yuv_color_space == key.yuv_color_space
+            && cached.key.yuv_range == key.yuv_range;
         for (std::uint32_t plane = 0; equal && plane < key.plane_count; ++plane) {
             equal = cached.key.strides[plane] == key.strides[plane]
                 && cached.key.offsets[plane] == key.offsets[plane]
@@ -326,6 +330,21 @@ DmabufGlesVideoRenderer::CachedImage* DmabufGlesVideoRenderer::find_or_import(co
 
 bool DmabufGlesVideoRenderer::import_image(const DmabufVideoFrame& frame, const ImageKey& key, CachedImage& cached)
 {
+    EGLint egl_color_space = EGL_ITU_REC709_EXT;
+    switch (frame.yuv_color_space) {
+    case DmabufYuvColorSpace::rec601:
+        egl_color_space = EGL_ITU_REC601_EXT;
+        break;
+    case DmabufYuvColorSpace::rec2020:
+        egl_color_space = EGL_ITU_REC2020_EXT;
+        break;
+    case DmabufYuvColorSpace::rec709:
+    case DmabufYuvColorSpace::unspecified:
+        break;
+    }
+    const EGLint egl_sample_range =
+        frame.yuv_range == DmabufYuvRange::full ? EGL_YUV_FULL_RANGE_EXT : EGL_YUV_NARROW_RANGE_EXT;
+
     std::vector<EGLint> attributes {
         EGL_WIDTH, static_cast<EGLint>(frame.width),
         EGL_HEIGHT, static_cast<EGLint>(frame.height),
@@ -336,8 +355,8 @@ bool DmabufGlesVideoRenderer::import_image(const DmabufVideoFrame& frame, const 
         EGL_DMA_BUF_PLANE1_FD_EXT, frame.fds[1],
         EGL_DMA_BUF_PLANE1_OFFSET_EXT, static_cast<EGLint>(frame.offsets[1]),
         EGL_DMA_BUF_PLANE1_PITCH_EXT, static_cast<EGLint>(frame.strides[1]),
-        EGL_YUV_COLOR_SPACE_HINT_EXT, EGL_ITU_REC709_EXT,
-        EGL_SAMPLE_RANGE_HINT_EXT, EGL_YUV_NARROW_RANGE_EXT,
+        EGL_YUV_COLOR_SPACE_HINT_EXT, egl_color_space,
+        EGL_SAMPLE_RANGE_HINT_EXT, egl_sample_range,
         EGL_NONE,
     };
 

@@ -85,6 +85,9 @@ private:
     std::uint32_t uv_stride_ {};
     std::uint32_t y_offset_ {};
     std::uint32_t uv_offset_ {};
+    glide::dev::DmabufYuvColorSpace yuv_color_space_ { glide::dev::DmabufYuvColorSpace::unspecified };
+    glide::dev::DmabufYuvRange yuv_range_ { glide::dev::DmabufYuvRange::unspecified };
+    std::string output_description_;
     std::uint64_t rtp_packets_ {};
     std::uint64_t sequence_gaps_ {};
     std::uint64_t late_packets_ {};

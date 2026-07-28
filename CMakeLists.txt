@@ -468,6 +468,7 @@ install(
         examples/autorun-local-video-to-glide.sh
         examples/stream-blurbusters-1080p120-to-glide-view.sh
         examples/stream-h264-file-to-glide-view.sh
+        examples/stream-orqa-video3-to-glide.sh
         examples/stream-rpicam-to-glide.sh
         examples/stream-videotestsrc-to-glide-auto.sh
         examples/stream-videotestsrc-to-glide-view.sh
