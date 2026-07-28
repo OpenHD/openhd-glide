@@ -250,6 +250,10 @@ On NXP i.MX8M Plus, use `--native-imxvpu-video` for direct
 NV12 DMA-BUF on the video plane while Flow and LVGL remain independent ARGB
 planes (or share the existing Flow fallback when the display exposes fewer
 usable overlay planes).
+If KMS exposes no NV12 scanout plane, Glide automatically imports the decoded
+DMA-BUF as an EGLImage and composites video, Flow, and LVGL with GLES into one
+RGB primary surface. The i.MX launcher defaults display and Flow cadence to
+60 Hz/fps; override `GLIDE_DISPLAY_HZ` or `GLIDE_FLOW_FPS` when required.
 On Raspberry Pi, start with the GStreamer path and the real KMS driver (`vc4-kms-v3d`). Raspberry Pi 5
 images should not be treated as H.264 hardware decode/encode targets; the current practical bring-up path is
 RTP/MJPEG in video-only KMS mode, where Glide decodes JPEG in software, copies BGRx into a DRM dumb buffer,
