@@ -27,8 +27,10 @@
 #include "common/mavlink_udp_bridge.hpp"
 #include "common/network_discovery.hpp"
 #include "common/preview_control.hpp"
+#include "dev/dmabuf_gles_video_renderer.hpp"
 #include "dev/kms_atomic_compositor.hpp"
 #include "dev/kms_dmabuf_video_plane.hpp"
+#include "dev/kms_gles_window.hpp"
 #include "glide_flow/altitude_widget.hpp"
 #include "glide_flow/fps_counter.hpp"
 #include "glide_flow/fps_overlay.hpp"
@@ -78,9 +80,31 @@
 #include <gst/video/video.h>
 #endif
 
+#if OPENHD_GLIDE_HAS_KMS_GBM
+#include <drm_fourcc.h>
+#endif
+
 namespace {
 
 volatile std::sig_atomic_t stop_requested = 0;
+
+bool connected_kms_supports_nv12()
+{
+#if OPENHD_GLIDE_HAS_KMS_GBM
+    const auto probe = glide::platform::probe_drm_planes();
+    for (const auto& device : probe.devices) {
+        if (!device.available) {
+            continue;
+        }
+        for (const auto& plane : device.planes) {
+            if (std::find(plane.formats.begin(), plane.formats.end(), DRM_FORMAT_NV12) != plane.formats.end()) {
+                return true;
+            }
+        }
+    }
+#endif
+    return false;
+}
 
 std::string rgb_hex(std::uint32_t rgb)
 {
@@ -1079,14 +1103,26 @@ int run_kms_video_preview(const Options& options)
     signal(SIGINT, request_stop);
     signal(SIGTERM, request_stop);
 
-    const bool use_atomic_kms = options.atomic_kms || options.flow_overlay || options.ui_overlay;
+    const bool single_plane_gles = options.native_imxvpu_video && !connected_kms_supports_nv12();
+    const bool use_atomic_kms = !single_plane_gles && (options.atomic_kms || options.flow_overlay || options.ui_overlay);
     glide::dev::KmsAtomicCompositor compositor;
     glide::dev::KmsDmabufVideoPlane legacy_output;
+    glide::dev::KmsGlesWindow single_plane_output;
+    glide::dev::DmabufGlesVideoRenderer single_plane_video;
     SharedUiBuffer shared_ui;
     auto ui_height = options.ui_height != 0 ? options.ui_height : options.flow_height;
     const auto flow_render_width = static_cast<std::uint32_t>(std::lround(static_cast<double>(options.preview_width) * options.flow_render_scale));
     const auto flow_render_height = static_cast<std::uint32_t>(std::lround(static_cast<double>(options.flow_height) * options.flow_render_scale));
-    if (use_atomic_kms) {
+    if (single_plane_gles) {
+        if (!single_plane_output.create(options.preview_width, options.flow_height, options.display_refresh_hz)) {
+            glide::log(glide::LogLevel::error, "OpenHD-Glide", single_plane_output.last_error());
+            return 1;
+        }
+        glide::log(
+            glide::LogLevel::info,
+            "OpenHD-Glide",
+            "KMS exposes no NV12 scanout plane; using DMA-BUF EGLImage video plus Flow/UI GLES composition on one RGB primary plane");
+    } else if (use_atomic_kms) {
         if (!compositor.create(
                 options.preview_width,
                 options.flow_height,
@@ -1158,7 +1194,9 @@ int run_kms_video_preview(const Options& options)
     std::atomic<double> video_plane_fps { 0.0 };
     std::atomic<bool> video_signal_present { false };
     std::atomic<bool> telemetry_signal_present { false };
-    auto flow_surface = use_atomic_kms ? compositor.surface_size() : glide::flow::SurfaceSize { options.preview_width, options.flow_height };
+    auto flow_surface = single_plane_gles
+        ? single_plane_output.surface_size()
+        : use_atomic_kms ? compositor.surface_size() : glide::flow::SurfaceSize { options.preview_width, options.flow_height };
     bool flow_runtime_logged {};
     bool ui_buffer_logged_ready {};
     constexpr auto ui_buffer_interval = std::chrono::milliseconds(16);
@@ -1203,10 +1241,10 @@ int run_kms_video_preview(const Options& options)
         if (!flow_renderer.available()) {
             return;
         }
-        if (!use_atomic_kms) {
+        if (!use_atomic_kms && !single_plane_gles) {
             return;
         }
-        flow_surface = compositor.surface_size();
+        flow_surface = single_plane_gles ? single_plane_output.surface_size() : compositor.surface_size();
         if (!flow_runtime_logged) {
             glide::log(glide::LogLevel::info, "OpenHD-Glide", flow_renderer.runtime_description());
             if (flow_renderer.likely_software_renderer()) {
@@ -1217,7 +1255,9 @@ int run_kms_video_preview(const Options& options)
             flow_runtime_logged = true;
         }
 
-        flow_renderer.clear(0.0F, 0.0F, 0.0F, 0.0F, flow_surface);
+        if (!single_plane_gles) {
+            flow_renderer.clear(0.0F, 0.0F, 0.0F, 0.0F, flow_surface);
+        }
         if (options.flow_debug_solid) {
             flow_renderer.draw_filled_quad(
                 { 0.0F, 0.0F },
@@ -1284,7 +1324,7 @@ int run_kms_video_preview(const Options& options)
             }
             const auto now = std::chrono::steady_clock::now();
             const bool update_ui_buffer = now >= next_ui_buffer_upload;
-            if (compositor.ui_overlay_plane_active()) {
+            if (!single_plane_gles && compositor.ui_overlay_plane_active()) {
                 if (update_ui_buffer && !compositor.publish_ui_frame_from_argb(shared_ui.map, options.ui_width, ui_height, options.ui_width * 4U)) {
                     glide::log(glide::LogLevel::warning, "OpenHD-Glide", compositor.last_error());
                 }
@@ -1328,11 +1368,27 @@ int run_kms_video_preview(const Options& options)
     };
 
     const auto present_waiting_overlay_frame = [&](bool update_flow, bool force) {
-        if (!use_atomic_kms || (!options.flow_overlay && !options.ui_overlay)) {
+        if (!use_atomic_kms && !single_plane_gles) {
             return true;
         }
         const auto now = std::chrono::steady_clock::now();
         if (!force && options.flow_fps > 0.0 && now < next_flow_frame) {
+            return true;
+        }
+        if (single_plane_gles) {
+            flow_renderer.clear(0.0F, 0.0F, 0.0F, 1.0F, flow_surface);
+            if (update_flow && (options.flow_overlay || options.ui_overlay)) {
+                render_flow_overlay();
+            }
+            single_plane_output.swap();
+            if (!single_plane_output.last_error().empty()) {
+                glide::log(glide::LogLevel::error, "OpenHD-Glide", single_plane_output.last_error());
+                return false;
+            }
+            update_flow_deadline();
+            return true;
+        }
+        if (!options.flow_overlay && !options.ui_overlay) {
             return true;
         }
         if (update_flow) {
@@ -1347,7 +1403,7 @@ int run_kms_video_preview(const Options& options)
     };
 
     const auto maybe_present_waiting_overlay = [&]() {
-        if (!use_atomic_kms || (!options.flow_overlay && !options.ui_overlay)) {
+        if (!use_atomic_kms && !single_plane_gles) {
             return true;
         }
         const auto now = std::chrono::steady_clock::now();
@@ -1614,6 +1670,24 @@ int run_kms_video_preview(const Options& options)
     }
 
     const auto present_video_frame = [&](const glide::dev::DmabufVideoFrame& frame, std::uint64_t presented_frames) {
+        if (single_plane_gles) {
+            if (!single_plane_video.draw(frame, flow_surface)) {
+                glide::log(glide::LogLevel::error, "OpenHD-Glide", single_plane_video.last_error());
+                return false;
+            }
+            if (options.flow_overlay || options.ui_overlay) {
+                render_flow_overlay();
+            }
+            single_plane_output.swap();
+            if (!single_plane_output.last_error().empty()) {
+                glide::log(glide::LogLevel::error, "OpenHD-Glide", single_plane_output.last_error());
+                return false;
+            }
+            video_signal_present.store(true, std::memory_order_relaxed);
+            last_video_frame_time = std::chrono::steady_clock::now();
+            update_flow_deadline();
+            return true;
+        }
         if (!use_atomic_kms) {
             if (!legacy_output.present(frame)) {
                 glide::log(glide::LogLevel::error, "OpenHD-Glide", legacy_output.last_error());
@@ -1646,6 +1720,10 @@ int run_kms_video_preview(const Options& options)
     };
 
     const auto present_cpu_video_frame = [&](const glide::dev::CpuVideoFrame& frame, std::uint64_t presented_frames) {
+        if (single_plane_gles) {
+            glide::log(glide::LogLevel::error, "OpenHD-Glide", "single-plane DMA-BUF GLES composition does not accept CPU video frames");
+            return false;
+        }
         if (!use_atomic_kms) {
             if (!legacy_output.present(frame)) {
                 glide::log(glide::LogLevel::error, "OpenHD-Glide", legacy_output.last_error());
@@ -1757,7 +1835,9 @@ int run_kms_video_preview(const Options& options)
         glide::log(
             glide::LogLevel::info,
             "OpenHD-Glide",
-            use_atomic_kms ? "atomic KMS video+Flow compositor running" : "fast legacy KMS video plane running");
+            single_plane_gles
+                ? "single-plane GLES video+Flow+UI compositor running"
+                : use_atomic_kms ? "atomic KMS video+Flow compositor running" : "fast legacy KMS video plane running");
 
         std::uint64_t frames {};
         std::uint64_t frames_since_log {};
@@ -1798,7 +1878,8 @@ int run_kms_video_preview(const Options& options)
                 std::ostringstream status;
                 status.setf(std::ios::fixed);
                 status.precision(1);
-                status << "native NXP i.MX VPU " << (use_atomic_kms ? "atomic video+Flow" : "legacy video")
+                status << "native NXP i.MX VPU "
+                       << (single_plane_gles ? "single-plane GLES composition" : use_atomic_kms ? "atomic video+Flow" : "legacy video")
                        << " fps=" << current_fps
                        << " total_frames=" << frames
                        << ' ' << imxvpu.stats();

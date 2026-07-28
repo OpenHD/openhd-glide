@@ -191,6 +191,7 @@ function(add_glide_executable target_name source_file)
 endfunction()
 
 add_library(glide_dev
+    src/dev/dmabuf_gles_video_renderer.cpp
     src/dev/kms_atomic_compositor.cpp
     src/dev/kms_dmabuf_video_plane.cpp
     src/dev/kms_gles_window.cpp
