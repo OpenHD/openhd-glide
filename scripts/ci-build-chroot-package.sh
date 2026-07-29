@@ -190,6 +190,7 @@ drop_rockchip_task_meta_for_build_deps() {
     mapfile -t rockchip_task_packages < <(
       dpkg-query -W -f='${db:Status-Abbrev} ${binary:Package}\n' \
         'task-rk*' \
+        'task-rock-*' \
         'task-rockchip*' \
         2>/dev/null \
         | awk '$1 ~ /^ii/ { print $2 }'
