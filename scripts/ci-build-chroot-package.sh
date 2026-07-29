@@ -187,12 +187,16 @@ clean_rk3588_broken_graphics_dev_state
 drop_rockchip_task_meta_for_build_deps() {
   apt-mark unhold task-rockchip task-rockchip-drm task-rockchip-gstreamer task-rockchip-xorg 2>/dev/null || true
   if [ "${target_release}" = "bullseye" ]; then
-    dpkg --remove --force-depends \
-      task-rockchip \
-      task-rockchip-drm \
-      task-rockchip-gstreamer \
-      task-rockchip-xorg \
-      2>/dev/null || true
+    mapfile -t rockchip_task_packages < <(
+      dpkg-query -W -f='${db:Status-Abbrev} ${binary:Package}\n' \
+        'task-rk*' \
+        'task-rockchip*' \
+        2>/dev/null \
+        | awk '$1 ~ /^ii/ { print $2 }'
+    )
+    if [ "${#rockchip_task_packages[@]}" -gt 0 ]; then
+      dpkg --remove --force-depends "${rockchip_task_packages[@]}" 2>/dev/null || true
+    fi
   fi
 }
 drop_rockchip_task_meta_for_build_deps
