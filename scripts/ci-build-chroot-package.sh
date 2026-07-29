@@ -185,10 +185,15 @@ clean_rk3588_broken_graphics_dev_state() {
 }
 clean_rk3588_broken_graphics_dev_state
 drop_rockchip_task_meta_for_build_deps() {
-  if ! is_rk3588_build; then
-    return 0
-  fi
   apt-mark unhold task-rockchip task-rockchip-drm task-rockchip-gstreamer task-rockchip-xorg 2>/dev/null || true
+  if [ "${target_release}" = "bullseye" ]; then
+    dpkg --remove --force-depends \
+      task-rockchip \
+      task-rockchip-drm \
+      task-rockchip-gstreamer \
+      task-rockchip-xorg \
+      2>/dev/null || true
+  fi
 }
 drop_rockchip_task_meta_for_build_deps
 extract_dev_deb_without_runtime_changes() {
@@ -213,7 +218,7 @@ graphics_dev_packages=(
   libegl-dev
   libgles-dev
 )
-if is_rk3588_build && [ "${target_release}" = "bookworm" ]; then
+if [ "${target_release}" = "bullseye" ] || { is_rk3588_build && [ "${target_release}" = "bookworm" ]; }; then
   for package_name in libdrm-dev libgbm-dev libglvnd-dev libegl-dev libgles-dev; do
     extract_dev_deb_without_runtime_changes "${package_name}"
   done
