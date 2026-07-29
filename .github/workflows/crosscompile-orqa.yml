@@ -42,7 +42,18 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Check Orqa SDK configuration
+        id: orqa_sdk
+        run: |
+          if [ -n "${DOWNLOAD_KEY}" ] && [ -n "${DOWNLOAD_URL}" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Skipping the Orqa cross-build because DOWNLOAD_KEY or DOWNLOAD_URL is not configured."
+          fi
+
       - name: Install host build tools
+        if: steps.orqa_sdk.outputs.available == 'true'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -52,12 +63,14 @@ jobs:
             xz-utils
 
       - name: Retrieve Orqa SDK installer
+        if: steps.orqa_sdk.outputs.available == 'true'
         run: |
           set -euo pipefail
           curl -# -u "${DOWNLOAD_KEY}" -O "${DOWNLOAD_URL}"
           test -f SDK-DTK_GCB_working_usb_and_88x2eu.sh
 
       - name: Install Orqa SDK
+        if: steps.orqa_sdk.outputs.available == 'true'
         env:
           SDK_INSTALL_DIR: ${{ runner.temp }}/orqa-sdk
         run: |
@@ -66,6 +79,7 @@ jobs:
           sh SDK-DTK_GCB_working_usb_and_88x2eu.sh -y -d "$SDK_INSTALL_DIR"
 
       - name: Configure OpenHD-Glide for Orqa
+        if: steps.orqa_sdk.outputs.available == 'true'
         env:
           SDK_INSTALL_DIR: ${{ runner.temp }}/orqa-sdk
         run: |
@@ -88,6 +102,7 @@ jobs:
             -DOPENHD_GLIDE_PREFER_SYSTEM_MESA=OFF
 
       - name: Build OpenHD-Glide
+        if: steps.orqa_sdk.outputs.available == 'true'
         env:
           SDK_INSTALL_DIR: ${{ runner.temp }}/orqa-sdk
         run: |
@@ -96,6 +111,7 @@ jobs:
           cmake --build build-orqa --parallel
 
       - name: Verify live Orqa runtime ABI
+        if: steps.orqa_sdk.outputs.available == 'true'
         env:
           SDK_INSTALL_DIR: ${{ runner.temp }}/orqa-sdk
         run: |
@@ -104,6 +120,7 @@ jobs:
           bash scripts/verify-orqa-runtime-abi.sh build-orqa
 
       - name: Install and strip artifact
+        if: steps.orqa_sdk.outputs.available == 'true'
         env:
           SDK_INSTALL_DIR: ${{ runner.temp }}/orqa-sdk
           DESTDIR: ${{ runner.temp }}/openhd-glide-orqa-rootfs
@@ -116,6 +133,7 @@ jobs:
           tar -C "$DESTDIR" -czf openhd-glide-orqa-aarch64.tar.gz .
 
       - name: Upload Orqa artifact
+        if: steps.orqa_sdk.outputs.available == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: openhd-glide-orqa-aarch64
