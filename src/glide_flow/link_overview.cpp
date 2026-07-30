@@ -56,11 +56,13 @@ std::string invalid_or_int_text(int value, std::string_view suffix = {})
 
 std::string channel_text(int frequency_mhz, int channel_width_mhz)
 {
-    std::string text = frequency_mhz > 10 ? std::to_string(frequency_mhz) : "Chan N/A";
+    std::string text = frequency_mhz > 10
+        ? std::to_string(frequency_mhz) + " MHz"
+        : "FREQ N/A";
     if (channel_width_mhz == 40 || channel_width_mhz == 20) {
-        text += " " + std::to_string(channel_width_mhz) + " MHz";
+        text += " BW" + std::to_string(channel_width_mhz);
     } else {
-        text += " N/A";
+        text += " BW N/A";
     }
     return text;
 }
