@@ -174,16 +174,15 @@ bool apply_ipc_line(Snapshot& snapshot, const std::string& line)
             int mcs_index {};
             float bitrate_mbit {};
             stream >> frequency_mhz >> channel_width_mhz >> mcs_index >> bitrate_mbit >> snapshot.rc_quality_percent >> snapshot.link_snr_antenna1_db >> snapshot.link_snr_antenna2_db >> snapshot.link_txc_temp_c;
+            snapshot.link_stats_valid = true;
             if (frequency_mhz > 0) {
                 snapshot.frequency_mhz = frequency_mhz;
             }
             if (channel_width_mhz > 0) {
                 snapshot.channel_width_mhz = channel_width_mhz;
             }
-            if (bitrate_mbit > 0.0F) {
-                snapshot.mcs_index = mcs_index;
-                snapshot.link_bitrate_mbit = bitrate_mbit;
-            }
+            snapshot.mcs_index = mcs_index;
+            snapshot.link_bitrate_mbit = std::max(0.0F, bitrate_mbit);
             snapshot.rc_quality_percent = clamp_percent(snapshot.rc_quality_percent);
         } else if (field == "core") {
             int platform_type {};

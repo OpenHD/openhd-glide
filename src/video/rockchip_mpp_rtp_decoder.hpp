@@ -66,6 +66,8 @@ private:
     bool flush_access_unit();
     bool update_x20_detection(const std::uint8_t* data, std::size_t size);
     bool inject_x20_header_if_needed();
+    bool inject_x20_header(bool allow_repeat);
+    bool recover_stalled_h264_if_needed();
     bool submit_packet(const std::uint8_t* data, std::size_t size, std::int64_t pts);
     bool submit_mjpeg_task(const std::uint8_t* data, std::size_t size, std::int64_t pts, std::uint32_t width, std::uint32_t height);
     void mjpeg_task_loop();
@@ -106,6 +108,8 @@ private:
     std::uint64_t x20_header_injections_ {};
     std::uint64_t submitted_packets_ {};
     std::uint64_t submit_stalls_ {};
+    std::uint64_t recovery_observed_decoded_frames_ {};
+    std::uint32_t access_units_without_decode_progress_ {};
     bool have_sequence_ {};
     std::uint16_t expected_sequence_ {};
     bool have_rtp_timestamp_ {};

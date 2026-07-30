@@ -797,7 +797,8 @@ bool RockchipMppRtpDecoder::flush_access_unit()
         return true;
     }
     const auto timestamp = access_unit_timestamp_;
-    const auto submitted = submit_packet(access_unit_.data(), access_unit_.size(), timestamp);
+    const auto recovered = recover_stalled_h264_if_needed();
+    const auto submitted = recovered && submit_packet(access_unit_.data(), access_unit_.size(), timestamp);
     have_access_unit_ = false;
     access_unit_.clear();
     return submitted;
@@ -828,7 +829,12 @@ bool RockchipMppRtpDecoder::update_x20_detection(const std::uint8_t* data, std::
 
 bool RockchipMppRtpDecoder::inject_x20_header_if_needed()
 {
-    if (x20_header_injected_ || x20_header_missing_) {
+    return inject_x20_header(false);
+}
+
+bool RockchipMppRtpDecoder::inject_x20_header(bool allow_repeat)
+{
+    if ((!allow_repeat && x20_header_injected_) || x20_header_missing_) {
         return true;
     }
 
@@ -861,6 +867,37 @@ bool RockchipMppRtpDecoder::inject_x20_header_if_needed()
 
     x20_header_missing_ = true;
     return true;
+}
+
+bool RockchipMppRtpDecoder::recover_stalled_h264_if_needed()
+{
+    if (h265_ || mjpeg_) {
+        return true;
+    }
+
+    std::uint64_t decoded_frames {};
+    {
+        std::lock_guard lock(mutex_);
+        decoded_frames = decoded_frames_;
+    }
+    if (decoded_frames != recovery_observed_decoded_frames_) {
+        recovery_observed_decoded_frames_ = decoded_frames;
+        access_units_without_decode_progress_ = 0;
+        return true;
+    }
+
+    ++access_units_without_decode_progress_;
+    constexpr std::uint32_t recovery_access_unit_threshold = 120;
+    if (access_units_without_decode_progress_ < recovery_access_unit_threshold) {
+        return true;
+    }
+
+    access_units_without_decode_progress_ = 0;
+    glide::log(
+        glide::LogLevel::warning,
+        "OpenHD-Glide",
+        "RKMPP H264 input has no decoded progress; injecting packaged X20/P401 recovery header");
+    return inject_x20_header(true);
 }
 
 void RockchipMppRtpDecoder::feed_loop()

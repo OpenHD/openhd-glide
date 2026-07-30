@@ -38,6 +38,7 @@ struct Snapshot {
     bool speed_valid {};
     bool position_valid {};
     bool battery_valid {};
+    bool link_stats_valid {};
     int frequency_mhz {};
     int channel_width_mhz {};
     int mcs_index {};
