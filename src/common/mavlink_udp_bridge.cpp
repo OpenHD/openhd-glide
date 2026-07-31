@@ -143,14 +143,14 @@ std::optional<std::string> decode_frame(const Frame& frame)
     case 0: {
         const auto type = read_le<std::uint8_t>(p, 4);
         const auto autopilot = read_le<std::uint8_t>(p, 5);
-        if (autopilot != 8 || type == 1 || type == 2 || type == 13 || type == 14 || type == 15) {
-            line << "mav alive fc 1";
-        } else if (frame.sysid >= 100) {
+        if (frame.sysid == openhd::system_id_ground) {
             line << "mav alive ground 1";
-        } else {
+        } else if (frame.sysid == openhd::system_id_air) {
             line << "mav alive air 1";
+        } else if (autopilot != 8 || type == 1 || type == 2 || type == 13 || type == 14 || type == 15) {
+            line << "mav alive fc 1";
         }
-        return line.str();
+        return line.str().empty() ? std::nullopt : std::optional<std::string>(line.str());
     }
     case 1: {
         const auto voltage_mv = read_le<std::uint16_t>(p, 14);
@@ -245,7 +245,7 @@ std::optional<std::string> decode_frame(const Frame& frame)
              << read_i8(p, openhd::wire::wifi_card_snr_antenna2_offset) << ' '
              << read_i8(p, openhd::wire::wifi_card_temperature_offset) << '\n'
              << "mav param auto "
-             << (frame.sysid >= 100 ? "GROUND_CHIPSET " : "AIR_CHIPSET ")
+             << (frame.sysid == openhd::system_id_ground ? "GROUND_CHIPSET " : "AIR_CHIPSET ")
              << openhd::wifi_card::type_to_string(card_type);
         return line.str();
     }
@@ -391,19 +391,19 @@ std::vector<std::string> UdpBridge::poll()
             if (frame.msgid == 0) {
                 const auto type = read_le<std::uint8_t>(frame.payload, 4);
                 const auto autopilot = read_le<std::uint8_t>(frame.payload, 5);
-                if (autopilot != 8 || type == 1 || type == 2 || type == 13 || type == 14 || type == 15) {
+                if (frame.sysid == openhd::system_id_ground) {
+                    ground_system_id_ = frame.sysid;
+                    ground_component_id_ = frame.compid;
+                } else if (frame.sysid == openhd::system_id_air) {
+                    air_system_id_ = frame.sysid;
+                    air_component_id_ = frame.compid;
+                } else if (autopilot != 8 || type == 1 || type == 2 || type == 13 || type == 14 || type == 15) {
                     flight_controller_system_id_ = frame.sysid;
                     flight_controller_component_id_ = frame.compid;
                     const auto base_mode = read_le<std::uint8_t>(frame.payload, 6);
                     const auto custom_mode = read_le<std::uint32_t>(frame.payload, 0);
                     lines.push_back(std::string("mav armed ") + ((base_mode & 0x80U) != 0 ? "1" : "0"));
                     lines.push_back("mav mode " + mode_from_heartbeat(base_mode, custom_mode));
-                } else if (frame.sysid >= 100) {
-                    ground_system_id_ = frame.sysid;
-                    ground_component_id_ = frame.compid;
-                } else {
-                    air_system_id_ = frame.sysid;
-                    air_component_id_ = frame.compid;
                 }
             }
             if (auto decoded = decode_frame(frame)) {

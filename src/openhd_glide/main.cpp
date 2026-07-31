@@ -330,6 +330,7 @@ struct Options {
     bool native_cedar_video {};
     bool native_imxvpu_video {};
     bool native_rkmpp_video {};
+    bool rkmpp_x20_force {};
     bool async_flow { true };
     bool flow_debug_solid {};
     bool flow_static_scanout {};
@@ -539,6 +540,8 @@ Options parse_options(int argc, char** argv)
             options.native_rkmpp_video = true;
             options.native_cedar_video = false;
             options.native_imxvpu_video = false;
+        } else if (argument == "--rkmpp-x20-force") {
+            options.rkmpp_x20_force = true;
         } else if (argument == "--gstreamer-video") {
             options.native_cedar_video = false;
             options.native_imxvpu_video = false;
@@ -1932,7 +1935,7 @@ int run_kms_video_preview(const Options& options)
 #if OPENHD_GLIDE_HAS_RKMPP
     if (options.native_rkmpp_video) {
         glide::video::RockchipMppRtpDecoder rkmpp;
-        if (!rkmpp.start(options.view_udp_port, options.view_udp_codec)) {
+        if (!rkmpp.start(options.view_udp_port, options.view_udp_codec, options.rkmpp_x20_force)) {
             glide::log(glide::LogLevel::error, "OpenHD-Glide", rkmpp.last_error());
             return 1;
         }

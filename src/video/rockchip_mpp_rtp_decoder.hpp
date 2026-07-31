@@ -44,7 +44,10 @@ public:
     RockchipMppRtpDecoder(const RockchipMppRtpDecoder&) = delete;
     RockchipMppRtpDecoder& operator=(const RockchipMppRtpDecoder&) = delete;
 
-    bool start(std::uint16_t udp_port, const std::string& codec);
+    bool start(
+        std::uint16_t udp_port,
+        const std::string& codec,
+        bool force_x20_header = false);
     bool poll(glide::dev::DmabufVideoFrame& frame);
     void mark_presented();
     std::string stats() const;
@@ -66,9 +69,8 @@ private:
     bool flush_access_unit();
     bool update_x20_detection(const std::uint8_t* data, std::size_t size);
     bool inject_x20_header_if_needed();
-    bool inject_x20_header(bool allow_repeat);
-    bool recover_stalled_h264_if_needed();
     bool submit_packet(const std::uint8_t* data, std::size_t size, std::int64_t pts);
+    bool configure_h26x_output_group(void* info_frame);
     bool submit_mjpeg_task(const std::uint8_t* data, std::size_t size, std::int64_t pts, std::uint32_t width, std::uint32_t height);
     void mjpeg_task_loop();
     bool frame_to_dmabuf(void* frame, glide::dev::DmabufVideoFrame& out);
@@ -108,8 +110,6 @@ private:
     std::uint64_t x20_header_injections_ {};
     std::uint64_t submitted_packets_ {};
     std::uint64_t submit_stalls_ {};
-    std::uint64_t recovery_observed_decoded_frames_ {};
-    std::uint32_t access_units_without_decode_progress_ {};
     bool have_sequence_ {};
     std::uint16_t expected_sequence_ {};
     bool have_rtp_timestamp_ {};
@@ -120,6 +120,7 @@ private:
     bool x20_checked_non_x20_ {};
     bool x20_header_injected_ {};
     bool x20_header_missing_ {};
+    bool force_x20_header_ {};
     bool logged_first_layout_ {};
     std::vector<std::uint8_t> fragment_;
     std::vector<std::uint8_t> access_unit_;

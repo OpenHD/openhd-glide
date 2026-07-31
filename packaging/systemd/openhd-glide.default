@@ -9,6 +9,10 @@ GLIDE_VIDEO_BACKEND=auto
 GLIDE_VIEW_PORT=5600
 GLIDE_VIEW_CODEC=h264
 
+# Force the packaged X20 recovery seed before the first H.264 NAL. Enable this
+# only on Artosyn/X20/P401 ground units. Normal H.264 sources should leave it 0.
+GLIDE_RKMPP_X20_FORCE=0
+
 # KMS mode and OSD/UI dimensions. Use auto/native/preferred or 0 to use the
 # first mode exposed by the connected display.
 GLIDE_WIDTH=auto

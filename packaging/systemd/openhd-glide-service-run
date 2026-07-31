@@ -187,6 +187,11 @@ case "$VIDEO_BACKEND" in
     ;;
 esac
 
+if [ "$VIDEO_BACKEND" = "rkmpp" ] \
+  && is_enabled "${GLIDE_RKMPP_X20_FORCE:-0}"; then
+  ARGS+=(--rkmpp-x20-force)
+fi
+
 ARGS+=(
   --view-udp-port "$VIEW_PORT"
   --view-udp-codec "$VIEW_CODEC"

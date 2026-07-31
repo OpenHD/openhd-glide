@@ -354,6 +354,20 @@ else()
     endif()
     target_compile_definitions(openhd-glide PRIVATE OPENHD_GLIDE_HAS_RKMPP=0)
 endif()
+
+add_glide_executable(glide-rkmpp-rtp-probe src/tools/rkmpp_rtp_probe.cpp)
+target_sources(glide-rkmpp-rtp-probe PRIVATE src/video/rockchip_mpp_rtp_decoder.cpp)
+target_link_libraries(glide-rkmpp-rtp-probe PRIVATE Threads::Threads)
+if(LIBDRM_FOUND)
+    target_include_directories(glide-rkmpp-rtp-probe PRIVATE ${LIBDRM_INCLUDE_DIRS})
+endif()
+if(ROCKCHIP_MPP_LIBRARY)
+    target_compile_definitions(glide-rkmpp-rtp-probe PRIVATE OPENHD_GLIDE_HAS_RKMPP=1)
+    target_link_libraries(glide-rkmpp-rtp-probe PRIVATE ${ROCKCHIP_MPP_LIBRARY})
+else()
+    target_compile_definitions(glide-rkmpp-rtp-probe PRIVATE OPENHD_GLIDE_HAS_RKMPP=0)
+endif()
+
 if(IMXVPUAPI2_FOUND AND IMXDMABUFFER_FOUND)
     target_compile_definitions(openhd-glide PRIVATE OPENHD_GLIDE_HAS_IMXVPU=1)
     target_include_directories(openhd-glide PRIVATE ${IMXVPUAPI2_INCLUDE_DIRS} ${IMXDMABUFFER_INCLUDE_DIRS})
@@ -432,6 +446,7 @@ install(
         glide-ui
         glide-minimap-demo
         glide-send
+        glide-rkmpp-rtp-probe
         openhd-glide-ethernet
     RUNTIME DESTINATION bin
 )
@@ -440,6 +455,7 @@ install(
     PROGRAMS
         scripts/build-auto.sh
         scripts/generate_fake_minimap_tiles.py
+        tools/artosyn_rtp_fixture.py
     DESTINATION share/openhd-glide/scripts
 )
 
@@ -476,7 +492,24 @@ install(
         examples/run-wsl-ui-preview.sh
         examples/run-wsl-minimap-preview.sh
         examples/run-wsl-video-decode.sh
+        examples/capture-artosyn-rtp.sh
+        examples/run-rkmpp-isolated-probe.sh
     DESTINATION share/openhd-glide/examples
+)
+
+install(
+    FILES
+        testdata/artosyn/p401-midstream-no-idr.rtp
+        testdata/artosyn/p401-midstream-no-idr.rtp.json
+        testdata/artosyn/header-injection-reproduction.txt
+        testdata/artosyn/README.md
+    DESTINATION share/openhd-glide/testdata/artosyn
+)
+
+install(
+    FILES
+        docs/artosyn-rkmpp-debug.md
+    DESTINATION share/doc/openhd-glide
 )
 
 if(UNIX AND NOT APPLE AND OPENHD_GLIDE_INSTALL_SYSTEMD)

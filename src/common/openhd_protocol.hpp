@@ -14,6 +14,9 @@
 
 namespace glide::openhd {
 
+inline constexpr std::uint8_t system_id_ground = 100;
+inline constexpr std::uint8_t system_id_air = 101;
+
 // Wire-level values mirrored from OpenHD. Keep these synchronized with:
 //   ohd_common/inc/openhd_platform.h
 //   ohd_video/misc/camera_registry.json

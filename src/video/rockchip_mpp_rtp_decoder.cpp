@@ -272,10 +272,14 @@ RockchipMppRtpDecoder::~RockchipMppRtpDecoder()
     cleanup();
 }
 
-bool RockchipMppRtpDecoder::start(std::uint16_t udp_port, const std::string& codec)
+bool RockchipMppRtpDecoder::start(
+    std::uint16_t udp_port,
+    const std::string& codec,
+    bool force_x20_header)
 {
 #if OPENHD_GLIDE_HAS_RKMPP
     last_error_.clear();
+    force_x20_header_ = force_x20_header;
     if (!init_mpp(codec)) {
         cleanup();
         return false;
@@ -292,6 +296,7 @@ bool RockchipMppRtpDecoder::start(std::uint16_t udp_port, const std::string& cod
 #else
     (void)udp_port;
     (void)codec;
+    (void)force_x20_header;
     last_error_ = "native Rockchip MPP decoder support was not found at build time";
     return false;
 #endif
@@ -766,26 +771,47 @@ bool RockchipMppRtpDecoder::queue_nal(const std::uint8_t* data, std::size_t size
     if (data == nullptr || size == 0) {
         return true;
     }
-    if (have_access_unit_ && access_unit_timestamp_ != timestamp && !flush_access_unit()) {
-        return false;
+    if (force_x20_header_ && !h265_ && !mjpeg_ && submitted_packets_ == 0
+        && !x20_sps_seen_ && !x20_pps_seen_ && !x20_header_injected_) {
+        glide::log(
+            glide::LogLevel::warning,
+            "OpenHD-Glide",
+            "injecting configured X20 recovery seed before first H264 NAL");
+        if (!inject_x20_header_if_needed()) {
+            return false;
+        }
+    }
+
+    const auto nal_type = h265_ ? ((data[0] >> 1U) & 0x3FU) : (data[0] & 0x1FU);
+    const bool is_vcl = h265_ ? nal_type <= 31U : (nal_type >= 1U && nal_type <= 5U);
+    if (!is_vcl) {
+        // Keep parameter sets and other non-picture NALs on FPVue's proven
+        // alignment=nal path. In particular, do not rebuild the old packet
+        // containing an X20 SPS/PPS/IDR seed followed by live data: that packet
+        // shape can wedge the RK3588 MPP parser.
+        return submit_nal(data, size, timestamp);
+    }
+
+    // One encoded picture may contain several VCL NALs. Raspberry Pi's x264
+    // low-latency pipeline enables sliced-threads, so treating every slice as a
+    // complete MPP packet produces a partially decoded top band and a green
+    // remainder. Group only VCL NALs sharing the RTP timestamp; single-slice
+    // X20 pictures still take this path as a one-NAL access unit.
+    if (have_access_unit_ && access_unit_timestamp_ != timestamp) {
+        // The RTP marker for the preceding picture was lost. Submitting a
+        // partial multi-slice picture poisons subsequent references, so discard
+        // it and wait for the new picture instead.
+        access_unit_.clear();
+        have_access_unit_ = false;
+        std::lock_guard lock(mutex_);
+        ++incomplete_fragments_;
     }
     if (!have_access_unit_) {
-        have_access_unit_ = true;
         access_unit_timestamp_ = timestamp;
-        access_unit_.clear();
+        have_access_unit_ = true;
     }
-
-    if (!h265_ && update_x20_detection(data, size) && !inject_x20_header_if_needed()) {
-        return false;
-    }
-
-    constexpr std::array<std::uint8_t, 4> prefix { 0x00, 0x00, 0x00, 0x01 };
-    if (size >= prefix.size() && std::equal(prefix.begin(), prefix.end(), data)) {
-        access_unit_.insert(access_unit_.end(), data, data + size);
-    } else {
-        access_unit_.insert(access_unit_.end(), prefix.begin(), prefix.end());
-        access_unit_.insert(access_unit_.end(), data, data + size);
-    }
+    append_start_code(access_unit_);
+    access_unit_.insert(access_unit_.end(), data, data + size);
     return true;
 }
 
@@ -797,8 +823,7 @@ bool RockchipMppRtpDecoder::flush_access_unit()
         return true;
     }
     const auto timestamp = access_unit_timestamp_;
-    const auto recovered = recover_stalled_h264_if_needed();
-    const auto submitted = recovered && submit_packet(access_unit_.data(), access_unit_.size(), timestamp);
+    const auto submitted = submit_packet(access_unit_.data(), access_unit_.size(), timestamp);
     have_access_unit_ = false;
     access_unit_.clear();
     return submitted;
@@ -829,12 +854,7 @@ bool RockchipMppRtpDecoder::update_x20_detection(const std::uint8_t* data, std::
 
 bool RockchipMppRtpDecoder::inject_x20_header_if_needed()
 {
-    return inject_x20_header(false);
-}
-
-bool RockchipMppRtpDecoder::inject_x20_header(bool allow_repeat)
-{
-    if ((!allow_repeat && x20_header_injected_) || x20_header_missing_) {
+    if (x20_header_injected_ || x20_header_missing_) {
         return true;
     }
 
@@ -867,37 +887,6 @@ bool RockchipMppRtpDecoder::inject_x20_header(bool allow_repeat)
 
     x20_header_missing_ = true;
     return true;
-}
-
-bool RockchipMppRtpDecoder::recover_stalled_h264_if_needed()
-{
-    if (h265_ || mjpeg_) {
-        return true;
-    }
-
-    std::uint64_t decoded_frames {};
-    {
-        std::lock_guard lock(mutex_);
-        decoded_frames = decoded_frames_;
-    }
-    if (decoded_frames != recovery_observed_decoded_frames_) {
-        recovery_observed_decoded_frames_ = decoded_frames;
-        access_units_without_decode_progress_ = 0;
-        return true;
-    }
-
-    ++access_units_without_decode_progress_;
-    constexpr std::uint32_t recovery_access_unit_threshold = 120;
-    if (access_units_without_decode_progress_ < recovery_access_unit_threshold) {
-        return true;
-    }
-
-    access_units_without_decode_progress_ = 0;
-    glide::log(
-        glide::LogLevel::warning,
-        "OpenHD-Glide",
-        "RKMPP H264 input has no decoded progress; injecting packaged X20/P401 recovery header");
-    return inject_x20_header(true);
 }
 
 void RockchipMppRtpDecoder::feed_loop()
@@ -980,6 +969,49 @@ bool RockchipMppRtpDecoder::submit_packet(const std::uint8_t* data, std::size_t 
         mpp_buffer_put(input_buffer);
     }
     return false;
+}
+
+bool RockchipMppRtpDecoder::configure_h26x_output_group(void* info_frame_ptr)
+{
+    if (info_frame_ptr == nullptr || mpi_ == nullptr || ctx_ == nullptr) {
+        return false;
+    }
+    if (output_group_ != nullptr) {
+        return true;
+    }
+
+    auto info_frame = as_frame(info_frame_ptr);
+    MppBufferGroup group {};
+    auto ret = mpp_buffer_group_get_internal(&group, MPP_BUFFER_TYPE_DRM);
+    if (ret != MPP_OK) {
+        ret = mpp_buffer_group_get_internal(&group, MPP_BUFFER_TYPE_ION);
+    }
+    if (ret != MPP_OK || group == nullptr) {
+        last_error_ = "failed to allocate RKMPP H.26x output buffer group";
+        return false;
+    }
+
+    auto buffer_size = static_cast<std::size_t>(mpp_frame_get_buf_size(info_frame));
+    if (buffer_size == 0) {
+        const auto hstride = static_cast<std::size_t>(mpp_frame_get_hor_stride(info_frame));
+        const auto vstride = static_cast<std::size_t>(mpp_frame_get_ver_stride(info_frame));
+        buffer_size = hstride * vstride * 2U;
+    }
+    constexpr std::size_t output_buffer_count = 16;
+    ret = mpp_buffer_group_limit_config(group, buffer_size, output_buffer_count);
+    if (ret != MPP_OK) {
+        mpp_buffer_group_put(group);
+        last_error_ = "failed to configure RKMPP H.26x output buffer group";
+        return false;
+    }
+    ret = as_mpi(mpi_)->control(as_ctx(ctx_), MPP_DEC_SET_EXT_BUF_GROUP, group);
+    if (ret != MPP_OK) {
+        mpp_buffer_group_put(group);
+        last_error_ = "failed to register RKMPP H.26x output buffer group";
+        return false;
+    }
+    output_group_ = group;
+    return true;
 }
 
 bool RockchipMppRtpDecoder::submit_mjpeg_task(const std::uint8_t* data, std::size_t size, std::int64_t pts, std::uint32_t width, std::uint32_t height)
@@ -1184,6 +1216,11 @@ void RockchipMppRtpDecoder::frame_loop()
             continue;
         }
         if (mpp_frame_get_info_change(frame)) {
+            if (!configure_h26x_output_group(frame)) {
+                release_frame(frame);
+                running_.store(false, std::memory_order_release);
+                break;
+            }
             as_mpi(mpi_)->control(as_ctx(ctx_), MPP_DEC_SET_INFO_CHANGE_READY, nullptr);
             release_frame(frame);
             continue;
@@ -1319,6 +1356,11 @@ void RockchipMppRtpDecoder::cleanup()
         auto* group = static_cast<MppBufferGroup>(input_group_);
         mpp_buffer_group_put(group);
         input_group_ = nullptr;
+    }
+    if (output_group_ != nullptr) {
+        auto* group = static_cast<MppBufferGroup>(output_group_);
+        mpp_buffer_group_put(group);
+        output_group_ = nullptr;
     }
     if (socket_fd_ >= 0) {
         close(socket_fd_);
