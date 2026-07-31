@@ -1,0 +1,14 @@
+{
+  "packets": 400,
+  "rtp_packets": 400,
+  "access_units": 27,
+  "capture_duration_us": 209909,
+  "h264_nal_packet_counts": {
+    "1": 373,
+    "9": 27
+  },
+  "format": "OHDRTP1",
+  "udp_destination_port": 5600,
+  "source_pcap_sha256": "cd691e6f42f842b9c4b16b94d5be9e6b155ef03ead8a539731af26dd79348e29",
+  "fixture_sha256": "aa56657923e7533a010f564fd304f9f952cc0431cc05d325d9ef4302a16e8037"
+}

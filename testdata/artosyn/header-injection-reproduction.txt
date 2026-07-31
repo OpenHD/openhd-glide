@@ -1,0 +1,72 @@
+OpenHD Glide RKMPP packaged-header injection reproduction
+=========================================================
+
+Device: Orange Pi 5 / RK3588, kernel 5.10.160-1
+Date: 2026-07-30
+
+Isolation:
+- openhd-glide.service stopped and runtime-masked
+- p401-openhd-bridge.service stopped and runtime-masked
+- p401-direct-daemon.service stopped and runtime-masked
+- no KMS, GlideUI, Flow, MAVLink, or Artosyn process
+- input: p401-midstream-no-idr.rtp replayed directly to UDP/5600
+
+Probe:
+  glide-rkmpp-rtp-probe --duration 30 --stats-ms 250 \
+    --debug-inject-x20-header
+
+Replay:
+  python3 tools/artosyn_rtp_fixture.py replay \
+    testdata/artosyn/p401-midstream-no-idr.rtp \
+    192.168.7.186 --cycles 1 --packet-delay-us 500
+
+Last output streamed over SSH before reset:
+
+  [WARN] DEBUG ONLY: injecting packaged X20 header before first H264 access unit
+  [INFO] first native RKMPP DMABUF layout fmt=0x0 width=1280 height=720
+         hstride=1280 vstride=720 buffer_size=1843200 fd=9
+         drm_format=NV12 luma_height=720 offset_uv=921600
+  probe_frames=2 parsed_units=3 submitted_packets=3 decoded_frames=2
+         rtp_packets=32 x20_header_injections=1 submit_stalls=0
+  probe_frames=2 parsed_units=7 submitted_packets=7 decoded_frames=2
+         rtp_packets=107 x20_header_injections=1 submit_stalls=1
+
+The SSH connection and ICMP reachability then disappeared immediately.
+
+Boot ID before replay:
+  86901d8b-eb39-42eb-ae4f-af2ba139c3e7
+
+Boot ID after the board returned:
+  3304afde-b710-4a6e-82f1-4b4cac2e02e2
+
+Finding at time of capture:
+The packaged-header path produced two decoded frames, then entered an RKMPP
+submit stall and hard-reset the board. The reset reproduced without any
+Artosyn hardware process or Glide rendering/composition process.
+
+Subsequent FPVue comparison:
+- FPVue packages the identical 692-byte x20_header.h264.
+- That file contains an IDR and two P-frames in addition to parameter sets.
+- FPVue provisions 16 external DRM output buffers on MPP info-change before
+  acknowledging MPP_DEC_SET_INFO_CHANGE_READY.
+- Glide acknowledged info-change without provisioning that output pool and
+  retained the currently scanned-out MppFrame.
+
+Follow-up A/B results (2026-07-31):
+- A 16-buffer internal DMA output group decoded all three seed frames but the
+  access-unit feed still stalled and reset the board.
+- Reusing one persistent MppPacket also stalled and reset the board.
+- FPVue itself, built from its openhd branch on this Orange Pi, accepted this
+  fixture with --x20-force and kept the same boot ID.
+- Glide changed from RTP-timestamp access-unit aggregation to FPVue-style
+  Annex-B NAL submission while retaining the 16-buffer output group.
+- One fixture cycle decoded 105 frames with zero stalls and no reboot.
+- Five fixture cycles sent 2,000 RTP packets / 656 NAL submissions, decoded
+  521 frames, reported zero submit stalls, and kept boot ID
+  b9a5113a-dc4d-4ace-be86-8419d2ac7cb3 unchanged.
+
+Conclusion:
+The reboot trigger was the combination of the X20 seed and Glide's aggregated
+access-unit MPP packets. FPVue's NAL-aligned feed is stable on the same board,
+seed, and captured mid-GOP input. The production H.264/H.265 RKMPP path now
+submits complete NALs independently.

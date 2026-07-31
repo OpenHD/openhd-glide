@@ -33,3 +33,5 @@ examples/examples/
 /CMakeFiles
 /tmp
 *.png
+__pycache__/
+*.py[cod]

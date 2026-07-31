@@ -1,0 +1,142 @@
+################################################################################
+# OpenHD
+#
+# Licensed under the GNU General Public License (GPL) Version 3.
+#
+# This software is provided "as-is," without warranty of any kind, express or
+# implied, including but not limited to the warranties of merchantability,
+# fitness for a particular purpose, and non-infringement. For details, see the
+# full license in the LICENSE file provided with this source code.
+#
+# Non-Military Use Only:
+# This software and its associated components are explicitly intended for
+# civilian and non-military purposes. Use in any military or defense
+# applications is strictly prohibited unless explicitly and individually
+# licensed otherwise by the OpenHD Team.
+#
+# Contributors:
+# A full list of contributors can be found at the OpenHD GitHub repository:
+# https://github.com/OpenHD
+#
+# © OpenHD, All Rights Reserved.
+################################################################################
+
+name: Cross-compile OpenHD-Glide with Orqa SDK
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - dev-release
+      - openhd-3.0
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    env:
+      DOWNLOAD_KEY: ${{ secrets.DOWNLOAD_KEY }}
+      DOWNLOAD_URL: ${{ secrets.DOWNLOAD_URL }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check Orqa SDK configuration
+        id: orqa_sdk
+        run: |
+          if [ -n "${DOWNLOAD_KEY}" ] && [ -n "${DOWNLOAD_URL}" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Skipping the Orqa cross-build because DOWNLOAD_KEY or DOWNLOAD_URL is not configured."
+          fi
+
+      - name: Install host build tools
+        if: steps.orqa_sdk.outputs.available == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            curl \
+            ninja-build \
+            pkg-config \
+            xz-utils
+
+      - name: Retrieve Orqa SDK installer
+        if: steps.orqa_sdk.outputs.available == 'true'
+        run: |
+          set -euo pipefail
+          curl -# -u "${DOWNLOAD_KEY}" -O "${DOWNLOAD_URL}"
+          test -f SDK-DTK_GCB_working_usb_and_88x2eu.sh
+
+      - name: Install Orqa SDK
+        if: steps.orqa_sdk.outputs.available == 'true'
+        env:
+          SDK_INSTALL_DIR: ${{ runner.temp }}/orqa-sdk
+        run: |
+          set -euo pipefail
+          mkdir -p "$SDK_INSTALL_DIR"
+          sh SDK-DTK_GCB_working_usb_and_88x2eu.sh -y -d "$SDK_INSTALL_DIR"
+
+      - name: Configure OpenHD-Glide for Orqa
+        if: steps.orqa_sdk.outputs.available == 'true'
+        env:
+          SDK_INSTALL_DIR: ${{ runner.temp }}/orqa-sdk
+        run: |
+          set -euo pipefail
+          source "$SDK_INSTALL_DIR/environment-setup-armv8a-poky-linux"
+          cmake -S . -B build-orqa -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/usr \
+            -DOPENHD_GLIDE_DEVICE_KMS=ON \
+            -DOPENHD_GLIDE_REQUIRE_KMS_GBM=ON \
+            -DOPENHD_GLIDE_ENABLE_GSTREAMER=OFF \
+            -DOPENHD_GLIDE_REQUIRE_GSTREAMER=OFF \
+            -DOPENHD_GLIDE_REQUIRE_FREETYPE=ON \
+            -DOPENHD_GLIDE_ENABLE_SDL2=OFF \
+            -DOPENHD_GLIDE_ENABLE_CEDAR=OFF \
+            -DOPENHD_GLIDE_ENABLE_RKMPP=OFF \
+            -DOPENHD_GLIDE_REQUIRE_RKMPP=OFF \
+            -DOPENHD_GLIDE_ENABLE_IMXVPU=ON \
+            -DOPENHD_GLIDE_REQUIRE_IMXVPU=ON \
+            -DOPENHD_GLIDE_PREFER_SYSTEM_MESA=OFF
+
+      - name: Build OpenHD-Glide
+        if: steps.orqa_sdk.outputs.available == 'true'
+        env:
+          SDK_INSTALL_DIR: ${{ runner.temp }}/orqa-sdk
+        run: |
+          set -euo pipefail
+          source "$SDK_INSTALL_DIR/environment-setup-armv8a-poky-linux"
+          cmake --build build-orqa --parallel
+
+      - name: Verify live Orqa runtime ABI
+        if: steps.orqa_sdk.outputs.available == 'true'
+        env:
+          SDK_INSTALL_DIR: ${{ runner.temp }}/orqa-sdk
+        run: |
+          set -euo pipefail
+          source "$SDK_INSTALL_DIR/environment-setup-armv8a-poky-linux"
+          bash scripts/verify-orqa-runtime-abi.sh build-orqa
+
+      - name: Install and strip artifact
+        if: steps.orqa_sdk.outputs.available == 'true'
+        env:
+          SDK_INSTALL_DIR: ${{ runner.temp }}/orqa-sdk
+          DESTDIR: ${{ runner.temp }}/openhd-glide-orqa-rootfs
+        run: |
+          set -euo pipefail
+          source "$SDK_INSTALL_DIR/environment-setup-armv8a-poky-linux"
+          cmake --install build-orqa
+          find "$DESTDIR/usr/bin" -maxdepth 1 -type f -exec "$STRIP" --strip-unneeded {} +
+          cp build-orqa/orqa-needed.txt "$DESTDIR/"
+          tar -C "$DESTDIR" -czf openhd-glide-orqa-aarch64.tar.gz .
+
+      - name: Upload Orqa artifact
+        if: steps.orqa_sdk.outputs.available == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: openhd-glide-orqa-aarch64
+          path: |
+            openhd-glide-orqa-aarch64.tar.gz
+            build-orqa/orqa-needed.txt

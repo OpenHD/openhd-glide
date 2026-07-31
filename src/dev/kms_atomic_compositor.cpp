@@ -713,8 +713,13 @@ bool KmsAtomicCompositor::present(const DmabufVideoFrame& video_frame, bool upda
         return false;
     }
 
-    const bool video_only_update = !update_flow_frame && flow_bo == nullptr;
-    if (!commit(video->framebuffer, video_frame.width, video_frame.height, flow_framebuffer, solid_ui_.framebuffer, video_only_update)) {
+    // The decoder releases the previously presented MPP frame immediately
+    // after this function returns. A nonblocking atomic commit can return
+    // before the page flip, while KMS is still scanning that previous DMABUF,
+    // allowing MPP to reuse and overwrite it mid-scan. Keep decoded-DMABUF
+    // commits synchronous so return also marks the safe buffer-release point.
+    if (!commit(video->framebuffer, video_frame.width, video_frame.height,
+                flow_framebuffer, solid_ui_.framebuffer, false)) {
         release_acquired_flow_framebuffer(flow_framebuffer, flow_bo, flow_is_solid_dumb);
         return false;
     }

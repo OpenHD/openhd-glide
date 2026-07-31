@@ -263,6 +263,7 @@ BufferDisplay* active_buffer_display {};
 
 struct LinuxKeyboardInput {
     std::vector<int> fds;
+    std::vector<std::filesystem::path> paths;
     std::chrono::steady_clock::time_point next_scan {};
 
     ~LinuxKeyboardInput()
@@ -280,6 +281,7 @@ struct LinuxKeyboardInput {
         }
 #endif
         fds.clear();
+        paths.clear();
     }
 };
 
@@ -345,8 +347,12 @@ std::string linux_key_name(unsigned short code)
 
 void open_keyboard_candidates(LinuxKeyboardInput& input)
 {
-    input.close_all();
     std::vector<std::filesystem::path> candidates;
+    const auto add_candidate = [&candidates](const std::filesystem::path& path) {
+        std::error_code canonical_error;
+        const auto canonical_path = std::filesystem::canonical(path, canonical_error);
+        candidates.push_back(canonical_error ? path : canonical_path);
+    };
     const auto by_path = std::filesystem::path("/dev/input/by-path");
     std::error_code error;
     if (std::filesystem::is_directory(by_path, error)) {
@@ -354,7 +360,7 @@ void open_keyboard_candidates(LinuxKeyboardInput& input)
             const auto path = entry.path();
             const auto name = path.filename().string();
             if (name.find("event-kbd") != std::string::npos) {
-                candidates.push_back(path);
+                add_candidate(path);
             }
         }
     }
@@ -366,16 +372,24 @@ void open_keyboard_candidates(LinuxKeyboardInput& input)
                 const auto path = entry.path();
                 const auto name = path.filename().string();
                 if (name.rfind("event", 0) == 0) {
-                    candidates.push_back(path);
+                    add_candidate(path);
                 }
             }
         }
     }
 
+    std::sort(candidates.begin(), candidates.end());
+    candidates.erase(std::unique(candidates.begin(), candidates.end()), candidates.end());
+    if (candidates == input.paths && !input.fds.empty()) {
+        return;
+    }
+
+    input.close_all();
     for (const auto& path : candidates) {
         const auto fd = open(path.c_str(), O_RDONLY | O_NONBLOCK | O_CLOEXEC);
         if (fd >= 0) {
             input.fds.push_back(fd);
+            input.paths.push_back(path);
         }
     }
 
@@ -386,7 +400,7 @@ void open_keyboard_candidates(LinuxKeyboardInput& input)
 
 void poll_linux_keyboard(LinuxKeyboardInput& input, UiState& state, std::chrono::steady_clock::time_point now)
 {
-    if (input.fds.empty() && now >= input.next_scan) {
+    if (now >= input.next_scan) {
         open_keyboard_candidates(input);
         input.next_scan = now + std::chrono::seconds(2);
     }
@@ -394,7 +408,7 @@ void poll_linux_keyboard(LinuxKeyboardInput& input, UiState& state, std::chrono:
     for (const auto fd : input.fds) {
         input_event event {};
         while (read(fd, &event, sizeof(event)) == sizeof(event)) {
-            if (event.type != EV_KEY || event.value == 0) {
+            if (event.type != EV_KEY || event.value != 1) {
                 continue;
             }
             const auto key = linux_key_name(event.code);
@@ -1102,6 +1116,11 @@ void send_openhd_param(UiState& state, const std::string& target, const std::str
     send_mavlink_action(state, glide::mavlink::format_action_set_param(target, param, value));
 }
 
+void send_artosyn_action(UiState& state, const std::string& param)
+{
+    send_openhd_param(state, "air", param, "1");
+}
+
 std::string next_resolution_fps_value(const std::string& current)
 {
     for (std::size_t i = 0; i < openhd_resolution_fps_presets.size(); ++i) {
@@ -1366,7 +1385,16 @@ void apply_terminal_key(UiState& state, const std::string& line)
             state.selected_row = 0;
             rebuild_ui(state);
         } else if (state.active_panel == SidebarPanel::dashboard && state.selected_row == 4) {
-            send_mavlink_action(state, glide::mavlink::format_action_command("scan", "bands=openhd width=" + std::to_string(state.mavlink.channel_width_mhz)));
+            if (state.mavlink.air_chipset.find("ARTOSYN") != std::string::npos
+                || state.mavlink.ground_chipset.find("ARTOSYN") != std::string::npos) {
+                send_artosyn_action(state, "AR_RESET_CMD");
+            } else {
+                send_mavlink_action(state, glide::mavlink::format_action_command("scan", "bands=openhd width=" + std::to_string(state.mavlink.channel_width_mhz)));
+            }
+        } else if (state.active_panel == SidebarPanel::dashboard && state.selected_row == 5
+                   && (state.mavlink.air_chipset.find("ARTOSYN") != std::string::npos
+                       || state.mavlink.ground_chipset.find("ARTOSYN") != std::string::npos)) {
+            send_artosyn_action(state, "AR_PAIR_CMD");
         } else if (state.active_panel == SidebarPanel::link && state.selected_row == 4) {
             send_openhd_param(state, "air", "WB_CHANNEL_W", std::to_string(next_channel_width_value(state.mavlink.channel_width_mhz)));
         } else if (state.active_panel == SidebarPanel::link && state.selected_row == 5) {
@@ -1503,17 +1531,84 @@ void keyboard_event(lv_event_t* event)
     }
 }
 
+bool radio_link_active(const glide::mavlink::Snapshot& snapshot)
+{
+    return snapshot.link_stats_valid
+        && snapshot.frequency_mhz > 0
+        && snapshot.channel_width_mhz > 0
+        && snapshot.link_bitrate_mbit > 0.0F;
+}
+
+bool artosyn_link(const glide::mavlink::Snapshot& snapshot)
+{
+    return snapshot.air_chipset.find("ARTOSYN") != std::string::npos
+        || snapshot.ground_chipset.find("ARTOSYN") != std::string::npos;
+}
+
+int wifi_channel_from_frequency(int frequency_mhz)
+{
+    if (frequency_mhz == 2484) {
+        return 14;
+    }
+    if (frequency_mhz >= 2412 && frequency_mhz <= 2472) {
+        return (frequency_mhz - 2407) / 5;
+    }
+    if (frequency_mhz >= 5000 && frequency_mhz <= 7125) {
+        return (frequency_mhz - 5000) / 5;
+    }
+    return 0;
+}
+
+std::string channel_label(const glide::mavlink::Snapshot& snapshot)
+{
+    if (snapshot.frequency_mhz <= 0) {
+        return "Waiting";
+    }
+    if (artosyn_link(snapshot)) {
+        return std::to_string(snapshot.frequency_mhz) + " MHz";
+    }
+    const auto channel = wifi_channel_from_frequency(snapshot.frequency_mhz);
+    if (channel > 0) {
+        return "CH " + std::to_string(channel) + " / " + std::to_string(snapshot.frequency_mhz) + " MHz";
+    }
+    return std::to_string(snapshot.frequency_mhz) + " MHz";
+}
+
 void build_dashboard_panel(UiState& state)
 {
     setup_panel_column(state.panel_body);
-    const auto connection = state.mavlink.air_alive && state.mavlink.ground_alive
+    const auto radio_active = radio_link_active(state.mavlink);
+    const auto air_available = state.mavlink.air_alive || radio_active;
+    const auto connection = air_available && state.mavlink.ground_alive
         ? std::string("Connected")
-        : (state.mavlink.air_alive ? std::string("AIR only") : (state.mavlink.ground_alive ? std::string("GND only") : std::string("Searching")));
-    const auto connection_color = state.mavlink.air_alive && state.mavlink.ground_alive ? 0x3df0b2 : 0xff8a00;
+        : (air_available ? std::string("AIR only") : (state.mavlink.ground_alive ? std::string("GND only") : std::string("Searching")));
+    const auto connection_color = air_available && state.mavlink.ground_alive ? 0x3df0b2 : 0xff8a00;
     value_row(state, "Link State", connection, connection_color);
-    value_row(state, "Air Unit", state.mavlink.air_alive ? "Online" : "Waiting", state.mavlink.air_alive ? 0x3df0b2 : 0xff8a00);
-    value_row(state, "Channels", "OpenHD [1-7]");
-    value_row(state, "Bandwidth", std::to_string(state.mavlink.channel_width_mhz) + " MHz");
+    value_row(state, "Air Unit", state.mavlink.air_alive ? "Online" : (radio_active ? "Linked" : "Waiting"), air_available ? 0x3df0b2 : 0xff8a00);
+    value_row(state, "Channel", channel_label(state.mavlink));
+    value_row(state, "Bandwidth", state.mavlink.channel_width_mhz > 0 ? std::to_string(state.mavlink.channel_width_mhz) + " MHz" : "Waiting");
+
+    if (artosyn_link(state.mavlink)) {
+        auto* reset = action_button(state, "RESET ARTOSYN LINK");
+        lv_obj_add_event_cb(
+            reset,
+            [](lv_event_t* event) {
+                auto* state = static_cast<UiState*>(lv_event_get_user_data(event));
+                send_artosyn_action(*state, "AR_RESET_CMD");
+            },
+            LV_EVENT_CLICKED,
+            &state);
+        auto* pair = action_button(state, "PAIR ARTOSYN");
+        lv_obj_add_event_cb(
+            pair,
+            [](lv_event_t* event) {
+                auto* state = static_cast<UiState*>(lv_event_get_user_data(event));
+                send_artosyn_action(*state, "AR_PAIR_CMD");
+            },
+            LV_EVENT_CLICKED,
+            &state);
+        return;
+    }
 
     auto* scan = action_button(state, "FIND AIR UNIT");
     lv_obj_add_event_cb(
@@ -1749,9 +1844,15 @@ void build_system_panel(UiState& state)
 void build_link_panel(UiState& state)
 {
     setup_panel_column(state.panel_body);
-    value_row(state, "Frequency", std::to_string(state.mavlink.frequency_mhz) + " MHz");
-    value_row(state, "Channel Width", std::to_string(state.mavlink.channel_width_mhz) + " MHz");
-    value_row(state, "Modulation", "MCS " + std::to_string(state.mavlink.mcs_index));
+    const auto radio_active = radio_link_active(state.mavlink);
+    const auto is_artosyn = artosyn_link(state.mavlink);
+    value_row(state, "Radio Link", radio_active ? "Active" : "Waiting", radio_active ? 0x20b383 : 0xff8a00);
+    value_row(state, is_artosyn ? "Artosyn Adapter" : "Ground Adapter", is_artosyn ? "ARTOSYN" : state.mavlink.ground_chipset);
+    value_row(state, is_artosyn ? "Frequency" : "Channel", channel_label(state.mavlink));
+    value_row(state, "Bandwidth", state.mavlink.channel_width_mhz > 0 ? std::to_string(state.mavlink.channel_width_mhz) + " MHz" : "Waiting");
+    value_row(state, "Modulation", state.mavlink.link_stats_valid ? "MCS " + std::to_string(state.mavlink.mcs_index) : "Waiting");
+    value_row(state, "Link Rate", state.mavlink.link_stats_valid ? std::to_string(static_cast<int>(std::round(state.mavlink.link_bitrate_mbit))) + " Mbit/s" : "Waiting");
+    value_row(state, "Link Quality", state.mavlink.link_stats_valid ? std::to_string(state.mavlink.rc_quality_percent) + "%" : "Waiting");
     value_row(state, "TX Power", std::to_string(state.mavlink.tx_power_mw) + " mW");
     auto* ethernet_section = label(state.panel_body, "Ethernet Glide", &lv_font_montserrat_18, 0xffffff);
     lv_obj_set_width(ethernet_section, LV_PCT(100));
@@ -1795,8 +1896,29 @@ void build_link_panel(UiState& state)
         LV_EVENT_CLICKED,
         &state);
 
-    auto* radio_section = label(state.panel_body, "OpenHD Radio", &lv_font_montserrat_18, 0xffffff);
+    auto* radio_section = label(state.panel_body, is_artosyn ? "Artosyn Radio" : "OpenHD Radio", &lv_font_montserrat_18, 0xffffff);
     lv_obj_set_width(radio_section, LV_PCT(100));
+    if (is_artosyn) {
+        auto* reset = action_button(state, "RESET ARTOSYN LINK");
+        lv_obj_add_event_cb(
+            reset,
+            [](lv_event_t* event) {
+                auto* state = static_cast<UiState*>(lv_event_get_user_data(event));
+                send_artosyn_action(*state, "AR_RESET_CMD");
+            },
+            LV_EVENT_CLICKED,
+            &state);
+        auto* pair = action_button(state, "PAIR ARTOSYN");
+        lv_obj_add_event_cb(
+            pair,
+            [](lv_event_t* event) {
+                auto* state = static_cast<UiState*>(lv_event_get_user_data(event));
+                send_artosyn_action(*state, "AR_PAIR_CMD");
+            },
+            LV_EVENT_CLICKED,
+            &state);
+        return;
+    }
     auto* width = action_button(state, "CYCLE CHANNEL WIDTH");
     lv_obj_add_event_cb(
         width,
@@ -2065,6 +2187,7 @@ void build_status_panel(UiState& state)
     const auto connection_color = state.mavlink.air_alive && state.mavlink.ground_alive ? 0x20b383 : 0xdf4c7c;
     value_row(state, "Connection", connection, connection_color);
     value_row(state, "OpenHD Version", state.mavlink.openhd_version, state.mavlink.openhd_version == "N/A" ? 0xdf4c7c : 0x20b383);
+    value_row(state, "Platform", state.mavlink.platform, state.mavlink.platform == "N/A" ? 0xdf4c7c : 0x20b383);
     value_row(state, "Chipset GND", state.mavlink.ground_chipset, state.mavlink.ground_alive ? 0x20b383 : 0xb3c6d6);
     value_row(state, "Chipset AIR", state.mavlink.air_chipset, state.mavlink.air_alive ? 0x20b383 : 0xdf4c7c);
     value_row(state, "Camera", state.mavlink.camera, state.mavlink.air_alive ? 0x20b383 : 0xdf4c7c);

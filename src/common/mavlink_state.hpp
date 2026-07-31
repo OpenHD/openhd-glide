@@ -38,6 +38,7 @@ struct Snapshot {
     bool speed_valid {};
     bool position_valid {};
     bool battery_valid {};
+    bool link_stats_valid {};
     int frequency_mhz {};
     int channel_width_mhz {};
     int mcs_index {};
@@ -72,6 +73,7 @@ struct Snapshot {
     std::string air_hotspot { "N/A" };
     std::string ground_hotspot { "N/A" };
     std::string openhd_version { "N/A" };
+    std::string platform { "N/A" };
     std::string ground_chipset { "N/A" };
     std::string air_chipset { "N/A" };
     std::string camera { "N/A" };

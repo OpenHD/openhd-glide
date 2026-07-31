@@ -48,7 +48,14 @@ option(OPENHD_GLIDE_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
 option(OPENHD_GLIDE_DEVICE_KMS "Enable the device-oriented DRM/KMS runtime mode" ON)
 option(OPENHD_GLIDE_REQUIRE_KMS_GBM "Fail configure if DRM/KMS GBM/EGL/GLES support is unavailable" OFF)
 option(OPENHD_GLIDE_REQUIRE_GSTREAMER "Fail configure if GStreamer appsink/DMABUF support is unavailable" OFF)
+option(OPENHD_GLIDE_REQUIRE_FREETYPE "Fail configure if FreeType support is unavailable" OFF)
 option(OPENHD_GLIDE_REQUIRE_RKMPP "Fail configure if native Rockchip MPP support is unavailable" OFF)
+option(OPENHD_GLIDE_REQUIRE_IMXVPU "Fail configure if native i.MX VPU API 2 support is unavailable" OFF)
+option(OPENHD_GLIDE_ENABLE_SDL2 "Enable the SDL2 development preview backend when available" ON)
+option(OPENHD_GLIDE_ENABLE_GSTREAMER "Enable GStreamer video paths when available" ON)
+option(OPENHD_GLIDE_ENABLE_CEDAR "Enable native Allwinner Cedar decoding when available" ON)
+option(OPENHD_GLIDE_ENABLE_RKMPP "Enable native Rockchip MPP decoding when available" ON)
+option(OPENHD_GLIDE_ENABLE_IMXVPU "Enable native NXP i.MX VPU API 2 decoding when available" ON)
 option(OPENHD_GLIDE_INSTALL_SYSTEMD "Install the OpenHD-Glide systemd autostart unit on Linux" ON)
 set(OPENHD_GLIDE_PACKAGE_SUFFIX "" CACHE STRING "Optional suffix for the Debian package name")
 set(OPENHD_GLIDE_PACKAGE_VERSION "${PROJECT_VERSION}" CACHE STRING "Debian package version")
@@ -95,9 +102,21 @@ if(PkgConfig_FOUND)
     pkg_check_modules(GBM QUIET gbm)
     pkg_check_modules(EGL QUIET egl)
     pkg_check_modules(GLESV2 QUIET glesv2)
-    pkg_check_modules(SDL2 QUIET sdl2)
+    if(OPENHD_GLIDE_ENABLE_SDL2)
+        pkg_check_modules(SDL2 QUIET sdl2)
+    endif()
     pkg_check_modules(FREETYPE QUIET freetype2)
-    pkg_check_modules(GSTREAMER QUIET gstreamer-1.0 gstreamer-app-1.0 gstreamer-allocators-1.0 gstreamer-video-1.0)
+    if(OPENHD_GLIDE_ENABLE_GSTREAMER)
+        pkg_check_modules(GSTREAMER QUIET gstreamer-1.0 gstreamer-app-1.0 gstreamer-allocators-1.0 gstreamer-video-1.0)
+    elseif(OPENHD_GLIDE_REQUIRE_GSTREAMER)
+        message(FATAL_ERROR "OPENHD_GLIDE_REQUIRE_GSTREAMER=ON conflicts with OPENHD_GLIDE_ENABLE_GSTREAMER=OFF")
+    endif()
+    if(OPENHD_GLIDE_ENABLE_IMXVPU)
+        pkg_check_modules(IMXVPUAPI2 QUIET libimxvpuapi2)
+        pkg_check_modules(IMXDMABUFFER QUIET libimxdmabuffer)
+    elseif(OPENHD_GLIDE_REQUIRE_IMXVPU)
+        message(FATAL_ERROR "OPENHD_GLIDE_REQUIRE_IMXVPU=ON conflicts with OPENHD_GLIDE_ENABLE_IMXVPU=OFF")
+    endif()
 endif()
 
 if(GBM_FOUND)
@@ -125,11 +144,17 @@ if(OPENHD_GLIDE_PREFER_SYSTEM_MESA AND UNIX AND NOT APPLE)
     endif()
 endif()
 
-find_library(CEDAR_VDECODER_LIBRARY NAMES vdecoder)
-find_library(CEDAR_MEMADAPTER_LIBRARY NAMES MemAdapter)
-find_library(CEDAR_VE_LIBRARY NAMES VE)
-find_library(CEDAR_VIDEOENGINE_LIBRARY NAMES videoengine)
-find_library(ROCKCHIP_MPP_LIBRARY NAMES rockchip_mpp)
+if(OPENHD_GLIDE_ENABLE_CEDAR)
+    find_library(CEDAR_VDECODER_LIBRARY NAMES vdecoder)
+    find_library(CEDAR_MEMADAPTER_LIBRARY NAMES MemAdapter)
+    find_library(CEDAR_VE_LIBRARY NAMES VE)
+    find_library(CEDAR_VIDEOENGINE_LIBRARY NAMES videoengine)
+endif()
+if(OPENHD_GLIDE_ENABLE_RKMPP)
+    find_library(ROCKCHIP_MPP_LIBRARY NAMES rockchip_mpp)
+elseif(OPENHD_GLIDE_REQUIRE_RKMPP)
+    message(FATAL_ERROR "OPENHD_GLIDE_REQUIRE_RKMPP=ON conflicts with OPENHD_GLIDE_ENABLE_RKMPP=OFF")
+endif()
 
 set(LV_CONF_PATH ${CMAKE_CURRENT_SOURCE_DIR}/src/glide_ui/lv_conf.h CACHE STRING "" FORCE)
 set(LV_CONF_BUILD_DISABLE_EXAMPLES ON CACHE BOOL "" FORCE)
@@ -166,6 +191,7 @@ function(add_glide_executable target_name source_file)
 endfunction()
 
 add_library(glide_dev
+    src/dev/dmabuf_gles_video_renderer.cpp
     src/dev/kms_atomic_compositor.cpp
     src/dev/kms_dmabuf_video_plane.cpp
     src/dev/kms_gles_window.cpp
@@ -278,12 +304,16 @@ if(FREETYPE_FOUND)
     target_link_libraries(glide_flow_core PRIVATE ${FREETYPE_LIBRARIES})
     target_link_directories(glide_flow_core PRIVATE ${FREETYPE_LIBRARY_DIRS})
 else()
+    if(OPENHD_GLIDE_REQUIRE_FREETYPE)
+        message(FATAL_ERROR "OPENHD_GLIDE_REQUIRE_FREETYPE=ON but FreeType development files were not found")
+    endif()
     target_compile_definitions(glide_flow_core PRIVATE OPENHD_GLIDE_HAS_FREETYPE=0)
 endif()
 
 add_glide_executable(openhd-glide src/openhd_glide/main.cpp)
 target_sources(openhd-glide PRIVATE
     src/video/cedar_rtp_decoder.cpp
+    src/video/imx_vpu_rtp_decoder.cpp
     src/video/rockchip_mpp_rtp_decoder.cpp)
 target_link_libraries(openhd-glide PRIVATE glide_dev glide_flow_core Threads::Threads)
 if(LIBDRM_FOUND)
@@ -323,6 +353,31 @@ else()
         message(FATAL_ERROR "OPENHD_GLIDE_REQUIRE_RKMPP=ON but librockchip_mpp was not found")
     endif()
     target_compile_definitions(openhd-glide PRIVATE OPENHD_GLIDE_HAS_RKMPP=0)
+endif()
+
+add_glide_executable(glide-rkmpp-rtp-probe src/tools/rkmpp_rtp_probe.cpp)
+target_sources(glide-rkmpp-rtp-probe PRIVATE src/video/rockchip_mpp_rtp_decoder.cpp)
+target_link_libraries(glide-rkmpp-rtp-probe PRIVATE Threads::Threads)
+if(LIBDRM_FOUND)
+    target_include_directories(glide-rkmpp-rtp-probe PRIVATE ${LIBDRM_INCLUDE_DIRS})
+endif()
+if(ROCKCHIP_MPP_LIBRARY)
+    target_compile_definitions(glide-rkmpp-rtp-probe PRIVATE OPENHD_GLIDE_HAS_RKMPP=1)
+    target_link_libraries(glide-rkmpp-rtp-probe PRIVATE ${ROCKCHIP_MPP_LIBRARY})
+else()
+    target_compile_definitions(glide-rkmpp-rtp-probe PRIVATE OPENHD_GLIDE_HAS_RKMPP=0)
+endif()
+
+if(IMXVPUAPI2_FOUND AND IMXDMABUFFER_FOUND)
+    target_compile_definitions(openhd-glide PRIVATE OPENHD_GLIDE_HAS_IMXVPU=1)
+    target_include_directories(openhd-glide PRIVATE ${IMXVPUAPI2_INCLUDE_DIRS} ${IMXDMABUFFER_INCLUDE_DIRS})
+    target_link_libraries(openhd-glide PRIVATE ${IMXVPUAPI2_LIBRARIES} ${IMXDMABUFFER_LIBRARIES})
+    target_link_directories(openhd-glide PRIVATE ${IMXVPUAPI2_LIBRARY_DIRS} ${IMXDMABUFFER_LIBRARY_DIRS})
+else()
+    if(OPENHD_GLIDE_REQUIRE_IMXVPU)
+        message(FATAL_ERROR "OPENHD_GLIDE_REQUIRE_IMXVPU=ON but libimxvpuapi2 and libimxdmabuffer were not found")
+    endif()
+    target_compile_definitions(openhd-glide PRIVATE OPENHD_GLIDE_HAS_IMXVPU=0)
 endif()
 add_glide_executable(glide-view src/glide_view/main.cpp)
 if(GSTREAMER_FOUND)
@@ -391,6 +446,7 @@ install(
         glide-ui
         glide-minimap-demo
         glide-send
+        glide-rkmpp-rtp-probe
         openhd-glide-ethernet
     RUNTIME DESTINATION bin
 )
@@ -399,6 +455,7 @@ install(
     PROGRAMS
         scripts/build-auto.sh
         scripts/generate_fake_minimap_tiles.py
+        tools/artosyn_rtp_fixture.py
     DESTINATION share/openhd-glide/scripts
 )
 
@@ -421,11 +478,13 @@ install(
         examples/run-kms-video-gstreamer-flow-30fps.sh
         examples/run-kms-video-gstreamer-video-only.sh
         examples/run-kms-video-rpi-video-only.sh
+        examples/run-kms-video-imxvpu-flow-ui.sh
         examples/run-kms-video-rkmpp-video-only.sh
         examples/run-kms-video-rkmpp-flow-ui.sh
         examples/autorun-local-video-to-glide.sh
         examples/stream-blurbusters-1080p120-to-glide-view.sh
         examples/stream-h264-file-to-glide-view.sh
+        examples/stream-orqa-video3-to-glide.sh
         examples/stream-rpicam-to-glide.sh
         examples/stream-videotestsrc-to-glide-auto.sh
         examples/stream-videotestsrc-to-glide-view.sh
@@ -433,7 +492,24 @@ install(
         examples/run-wsl-ui-preview.sh
         examples/run-wsl-minimap-preview.sh
         examples/run-wsl-video-decode.sh
+        examples/capture-artosyn-rtp.sh
+        examples/run-rkmpp-isolated-probe.sh
     DESTINATION share/openhd-glide/examples
+)
+
+install(
+    FILES
+        testdata/artosyn/p401-midstream-no-idr.rtp
+        testdata/artosyn/p401-midstream-no-idr.rtp.json
+        testdata/artosyn/header-injection-reproduction.txt
+        testdata/artosyn/README.md
+    DESTINATION share/openhd-glide/testdata/artosyn
+)
+
+install(
+    FILES
+        docs/artosyn-rkmpp-debug.md
+    DESTINATION share/doc/openhd-glide
 )
 
 if(UNIX AND NOT APPLE AND OPENHD_GLIDE_INSTALL_SYSTEMD)

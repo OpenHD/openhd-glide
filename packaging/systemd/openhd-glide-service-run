@@ -88,7 +88,7 @@ VIEW_CODEC="$(lowercase "${GLIDE_VIEW_CODEC:-h264}")"
 WIDTH="${GLIDE_WIDTH:-auto}"
 HEIGHT="${GLIDE_HEIGHT:-auto}"
 FLOW_FPS="${GLIDE_FLOW_FPS:-120}"
-FLOW_RENDER_SCALE="${GLIDE_FLOW_RENDER_SCALE:-1.0}"
+FLOW_RENDER_SCALE="${GLIDE_FLOW_RENDER_SCALE:-auto}"
 DISPLAY_HZ="${GLIDE_DISPLAY_HZ:-0}"
 case "$(lowercase "$DISPLAY_HZ")" in
   ""|auto|highest|best)
@@ -103,6 +103,16 @@ CPU_GOVERNOR="${GLIDE_CPU_GOVERNOR:-performance}"
 MAIN_NICE="${GLIDE_MAIN_NICE:--10}"
 MAIN_CHRT_PRIORITY="${GLIDE_MAIN_CHRT_PRIORITY:-}"
 UI_NICE="${GLIDE_UI_NICE:-5}"
+
+case "$(lowercase "$FLOW_RENDER_SCALE")" in
+  ""|auto|native|best)
+    if is_rk3588; then
+      FLOW_RENDER_SCALE=1.0
+    else
+      FLOW_RENDER_SCALE=0.5
+    fi
+    ;;
+esac
 
 case "$VIEW_CODEC" in
   h264|avc)
@@ -176,6 +186,11 @@ case "$VIDEO_BACKEND" in
     exit 2
     ;;
 esac
+
+if [ "$VIDEO_BACKEND" = "rkmpp" ] \
+  && is_enabled "${GLIDE_RKMPP_X20_FORCE:-0}"; then
+  ARGS+=(--rkmpp-x20-force)
+fi
 
 ARGS+=(
   --view-udp-port "$VIEW_PORT"

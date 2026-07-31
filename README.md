@@ -35,6 +35,21 @@ It also computes the first worker CPU assignment plan: `glide-view` gets the str
 
 ## Build
 
+### Orqa cross-build
+
+The `crosscompile-orqa.yml` GitHub Actions workflow uses the Orqa Yocto SDK
+and produces a stripped AArch64 rootfs archive. The target profile is based on
+the live DTK-EVK at `192.168.7.145`: SDL2, native Rockchip MPP, and native
+Allwinner Cedar are disabled. H.264/H.265 video decoding uses the target's
+`libimxvpuapi2` Hantro VPU backend directly and exports NV12 DMA-BUF frames;
+the Orqa artifact does not link GStreamer.
+
+Before packaging, `scripts/verify-orqa-runtime-abi.sh` checks every executable
+is AArch64, verifies the DRM/GBM/EGL/GLES, FreeType, i.MX VPU API 2,
+DMA-buffer, and zlib SONAMEs used by the live Scarthgap image, and rejects
+SDL2, GStreamer, MPP, or Cedar dependencies. The workflow publishes
+`openhd-glide-orqa-aarch64.tar.gz`.
+
 ```sh
 cmake -S . -B build
 cmake --build build
@@ -230,6 +245,30 @@ and scanning it out on a KMS video plane. It still uses a black primary framebuf
 Flow is rendered on an ARGB overlay plane. With `--ui-overlay`, the controller also places a left-side ARGB UI
 overlay plane or composites the LVGL buffer into the Flow/OSD plane when RK3566 exposes only one usable ARGB plane.
 Native Cedar remains available only through the explicit `--native-cedar-video` flag.
+On NXP i.MX8M Plus, use `--native-imxvpu-video` for direct
+`libimxvpuapi2`/Hantro decoding without GStreamer. The controller imports the
+NV12 DMA-BUF on the video plane while Flow and LVGL remain independent ARGB
+planes (or share the existing Flow fallback when the display exposes fewer
+usable overlay planes).
+On detected NXP i.MX hardware, if KMS exposes no NV12 scanout plane, Glide
+automatically imports the decoded DMA-BUF as an EGLImage and composites video,
+Flow, and LVGL with GLES into one RGB primary surface. The native i.MX VPU mode
+and this fallback are rejected on non-NXP hardware. The i.MX launcher defaults
+display and Flow cadence to 60 Hz/fps; override `GLIDE_DISPLAY_HZ` or
+`GLIDE_FLOW_FPS` when required.
+
+On the ORQA i.MX8MP board, `/dev/video3` is a 960x720 source. All three media
+pads must use that width; 944x720 truncates every CSI line and produces green or
+mangled frames. The hardware camera/encoder test sender configures the pads and
+streams RTP/H.264 at 60 fps:
+
+```bash
+examples/stream-orqa-video3-to-glide.sh 127.0.0.1 5600
+```
+
+This script is NXP-gated and uses GStreamer only as an external camera test
+sender. Glide still performs native `libimxvpuapi2` decoding and direct
+DMA-BUF/EGL composition without GStreamer.
 On Raspberry Pi, start with the GStreamer path and the real KMS driver (`vc4-kms-v3d`). Raspberry Pi 5
 images should not be treated as H.264 hardware decode/encode targets; the current practical bring-up path is
 RTP/MJPEG in video-only KMS mode, where Glide decodes JPEG in software, copies BGRx into a DRM dumb buffer,
@@ -244,6 +283,9 @@ Set `GLIDE_WIDTH` and `GLIDE_HEIGHT` to override the default `1920x1080`.
 Device KMS scripts default to `GLIDE_DISPLAY_HZ=0`, which auto-selects the highest refresh mode exposed by the connected display. Set `GLIDE_DISPLAY_HZ` to a non-zero value to request a specific refresh rate.
 
 ```sh
+# Native NXP i.MX8M Plus Hantro decode, KMS video plus Flow and LVGL UI.
+examples/run-kms-video-imxvpu-flow-ui.sh 5600 h264
+
 # Native Rockchip MPP decode, fastest RK3566/RK3568 video-only path.
 examples/run-kms-video-rkmpp-video-only.sh 5600 h264
 

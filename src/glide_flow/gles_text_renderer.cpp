@@ -356,6 +356,13 @@ bool GlesTextRenderer::ensure_text_initialized()
     }
 
     const std::array font_paths {
+        // Orange OS and several embedded distributions install Noto directly
+        // below /usr/share/fonts instead of the Debian truetype hierarchy.
+        // Prefer the medium face for legible OSD text over moving video.
+        "/usr/share/fonts/noto/NotoSans-Medium.ttf",
+        "/usr/share/fonts/noto/NotoSans-Regular.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSans-Medium.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed.ttf",
         "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
