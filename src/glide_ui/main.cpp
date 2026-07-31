@@ -1241,6 +1241,41 @@ void request_panel_rebuild(UiState& state, std::chrono::steady_clock::time_point
     }
 }
 
+void invalidate_ui_handles(UiState& state)
+{
+    // lv_obj_clean(root) destroys the complete sidebar tree. Never leave raw
+    // LVGL pointers referring to that tree: telemetry can arrive while the UI
+    // is hidden and otherwise tries to update the deleted panel objects.
+    state.panel_title = nullptr;
+    state.panel_body = nullptr;
+    state.fps_switch = nullptr;
+    state.fps_label = nullptr;
+    state.coordinates_switch = nullptr;
+    state.coordinates_label = nullptr;
+    state.compact_switch = nullptr;
+    state.compact_label = nullptr;
+    state.top_bar_switch = nullptr;
+    state.top_bar_label = nullptr;
+    state.osd_dropdown = nullptr;
+    state.osd_label = nullptr;
+    state.theme_dropdowns.fill(nullptr);
+    state.theme_labels.fill(nullptr);
+    state.resolution_dropdown = nullptr;
+    state.resolution_label = nullptr;
+    state.display_hz_slider = nullptr;
+    state.display_hz_label = nullptr;
+    state.flow_fps_slider = nullptr;
+    state.flow_fps_label = nullptr;
+    state.flow_scale_slider = nullptr;
+    state.flow_scale_label = nullptr;
+    state.scan_bar = nullptr;
+    state.scan_percent = nullptr;
+    for (auto& nav_button : state.nav_buttons) {
+        nav_button = nullptr;
+    }
+    state.row_count = 0;
+}
+
 void rebuild_ui(UiState& state)
 {
     if (state.root == nullptr) {
@@ -1250,6 +1285,7 @@ void rebuild_ui(UiState& state)
     const auto height = lv_obj_get_height(state.root);
     state.minimap.reset();
     lv_obj_clean(state.root);
+    invalidate_ui_handles(state);
     build_overlay(state, static_cast<std::uint32_t>(width), static_cast<std::uint32_t>(height));
     state.panel_rebuild_pending = false;
 }
@@ -2715,11 +2751,11 @@ void poll_ipc(UiState& state, std::chrono::steady_clock::time_point now)
             }
         } else if (apply_theme_state_line(state, line)) {
         } else if (apply_network_state_line(state, line)) {
-            if (panel_uses_network(state.active_panel)) {
+            if (state.overlay_mode == OverlayMode::menu && panel_uses_network(state.active_panel)) {
                 request_panel_rebuild(state, now);
             }
         } else if (glide::mavlink::apply_ipc_line(state.mavlink, line)) {
-            if (panel_uses_mavlink(state.active_panel)) {
+            if (state.overlay_mode == OverlayMode::menu && panel_uses_mavlink(state.active_panel)) {
                 request_panel_rebuild(state, now);
             }
         } else {
