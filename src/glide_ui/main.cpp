@@ -1579,10 +1579,10 @@ void build_dashboard_panel(UiState& state)
     setup_panel_column(state.panel_body);
     const auto radio_active = radio_link_active(state.mavlink);
     const auto air_available = state.mavlink.air_alive || radio_active;
-    const auto connection = air_available && state.mavlink.ground_alive
+    const auto connection = radio_active
         ? std::string("Connected")
         : (air_available ? std::string("AIR only") : (state.mavlink.ground_alive ? std::string("GND only") : std::string("Searching")));
-    const auto connection_color = air_available && state.mavlink.ground_alive ? 0x3df0b2 : 0xff8a00;
+    const auto connection_color = radio_active ? 0x3df0b2 : 0xff8a00;
     value_row(state, "Link State", connection, connection_color);
     value_row(state, "Air Unit", state.mavlink.air_alive ? "Online" : (radio_active ? "Linked" : "Waiting"), air_available ? 0x3df0b2 : 0xff8a00);
     value_row(state, "Channel", channel_label(state.mavlink));
