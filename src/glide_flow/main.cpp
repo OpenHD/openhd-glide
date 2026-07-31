@@ -141,7 +141,7 @@ glide::flow::OsdTheme load_theme()
 {
     return glide::flow::OsdTheme {
         .text = color_from_rgb(glide::preview_control::theme_color("bar_text"), 0.98F),
-        .bar_background = color_from_rgb(glide::preview_control::theme_color("bar_background"), 0.94F),
+        .bar_background = color_from_rgb(glide::preview_control::theme_color("bar_background"), 80.0F / 255.0F),
         .primary = color_from_rgb(glide::preview_control::theme_color("primary"), 0.92F),
         .secondary = color_from_rgb(glide::preview_control::theme_color("secondary"), 0.90F),
     };

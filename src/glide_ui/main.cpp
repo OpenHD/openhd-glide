@@ -264,6 +264,7 @@ BufferDisplay* active_buffer_display {};
 struct LinuxKeyboardInput {
     std::vector<int> fds;
     std::vector<std::filesystem::path> paths;
+    std::array<bool, 768> keys_down {};
     std::chrono::steady_clock::time_point next_scan {};
 
     ~LinuxKeyboardInput()
@@ -282,6 +283,9 @@ struct LinuxKeyboardInput {
 #endif
         fds.clear();
         paths.clear();
+#if defined(__linux__)
+        keys_down.fill(false);
+#endif
     }
 };
 
@@ -408,9 +412,20 @@ void poll_linux_keyboard(LinuxKeyboardInput& input, UiState& state, std::chrono:
     for (const auto fd : input.fds) {
         input_event event {};
         while (read(fd, &event, sizeof(event)) == sizeof(event)) {
-            if (event.type != EV_KEY || event.value != 1) {
+            if (event.type != EV_KEY || event.code >= input.keys_down.size()) {
                 continue;
             }
+            if (event.value == 0) {
+                input.keys_down[event.code] = false;
+                continue;
+            }
+            // Dispatch once per physical press. Some HID receivers emit a
+            // second value=1 event instead of the standard value=2 repeat;
+            // treating it as a new press made menu focus jump left by itself.
+            if (event.value != 1 || input.keys_down[event.code]) {
+                continue;
+            }
+            input.keys_down[event.code] = true;
             const auto key = linux_key_name(event.code);
             if (!key.empty()) {
                 dispatch_key(state, key.c_str());
