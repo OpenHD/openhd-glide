@@ -91,7 +91,7 @@ jobs:
         if: github.event_name != 'pull_request'
         id: cloudsmith
         run: |
-          if [[ "${GITHUB_REF_NAME}" == openhd-3.0 ]]; then
+          if [[ "${GITHUB_REF_NAME}" == main || "${GITHUB_REF_NAME}" == openhd-3.0 ]]; then
             echo repo=dev-release >> "${GITHUB_OUTPUT}"
           else
             echo "repo=${GITHUB_REF_NAME}" >> "${GITHUB_OUTPUT}"
