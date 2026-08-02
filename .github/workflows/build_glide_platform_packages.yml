@@ -214,11 +214,15 @@ jobs:
     if: github.event_name == 'push'
     needs: [architecture-package, cedar-platform-packages]
     runs-on: ubuntu-22.04
+    env:
+      GH_TOKEN: ${{ secrets.OPENHD_SUBMODULE_TOKEN }}
     steps:
       - name: Start ImageBuilder after packages are published
-        env:
-          GH_TOKEN: ${{ secrets.OPENHD_SUBMODULE_TOKEN }}
+        if: env.GH_TOKEN != ''
         run: |
           gh api --method POST \
             /repos/OpenHD/OpenHD-ImageBuilder/actions/workflows/update-image.yml/dispatches \
             -f ref=dev-release
+      - name: Report unavailable cross-repository dispatch
+        if: env.GH_TOKEN == ''
+        run: echo "ImageBuilder dispatch skipped because OPENHD_SUBMODULE_TOKEN is not configured in this repository."
