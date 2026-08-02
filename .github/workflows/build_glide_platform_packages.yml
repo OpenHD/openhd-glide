@@ -26,34 +26,131 @@ name: build_glide_platform_packages
 on:
   workflow_dispatch:
   push:
-    branches:
-      - "main"
-      - "dev-release"
-      - "release"
-      - "openhd-3.0"
+    branches: [main, dev-release, release, openhd-3.0]
 
 jobs:
-  build:
+  architecture-package:
+    name: package-arm64
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install cross-build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-10-aarch64-linux-gnu g++-10-aarch64-linux-gnu \
+            cmake curl dpkg-dev file make mmdebstrap ninja-build pkg-config zstd
+
+      - name: Fetch verified OpenHD ARM64 sysroot
+        run: |
+          archive=openhd-sysroot-bullseye-arm64.tar.zst
+          base=https://dl.cloudsmith.io/public/openhd/dev-release/raw/files
+          checksum="$(curl -fsSL "${base}/${archive}.sha256" | awk 'NR == 1 { print $1 }')"
+          test "${#checksum}" -eq 64
+          ./scripts/fetch_cross_sysroot.sh \
+            "${base}/${archive}" "${checksum}" "${RUNNER_TEMP}/sysroot-arm64"
+          sudo ./scripts/augment_cross_sysroot_rkmpp.sh "${RUNNER_TEMP}/sysroot-arm64"
+
+      - name: Cross-build universal ARM64 package
+        env:
+          OPENHD_GLIDE_PACKAGE_VERSION: 0.1.0.${{ github.run_number }}
+        run: |
+          ./scripts/build_portable_cross.sh \
+            arm64 "${RUNNER_TEMP}/sysroot-arm64" "${RUNNER_TEMP}/build-arm64"
+          find "${RUNNER_TEMP}/build-arm64" -maxdepth 1 -name '*.deb' -exec cp {} . \;
+
+      - name: Validate package portability
+        run: |
+          package="$(find . -maxdepth 1 -name 'openhd-glide_*_arm64.deb' -print -quit)"
+          test -n "${package}"
+          test "$(dpkg-deb -f "${package}" Package)" = openhd-glide
+          test "$(dpkg-deb -f "${package}" Architecture)" = arm64
+          dpkg-deb -f "${package}" Conflicts | grep -q openhd-glide-rock5a
+          mkdir package-root
+          dpkg-deb -x "${package}" package-root
+          test -f package-root/usr/lib/openhd-glide/librockchip_mpp.so.1
+          readelf -d package-root/usr/bin/openhd-glide | tee openhd-glide-needed.txt
+          grep -q 'librockchip_mpp.so.1' openhd-glide-needed.txt
+          grep -q '\$ORIGIN/../lib/openhd-glide' openhd-glide-needed.txt
+          ar t "${package}" | grep -Eq '^control\.tar\.(gz|xz)$'
+          ar t "${package}" | grep -qx data.tar.xz
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OpenHD-Glide-arm64
+          path: |
+            openhd-glide_*_arm64.deb
+            openhd-glide-needed.txt
+          if-no-files-found: error
+
+      - name: Resolve Cloudsmith target
+        if: github.event_name != 'pull_request'
+        id: cloudsmith
+        run: |
+          if [[ "${GITHUB_REF_NAME}" == openhd-3.0 ]]; then
+            echo repo=dev-release >> "${GITHUB_OUTPUT}"
+          else
+            echo "repo=${GITHUB_REF_NAME}" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Publish universal package
+        if: github.event_name != 'pull_request'
+        uses: cloudsmith-io/action@v0.6.14
+        with:
+          api-key: ${{ secrets.CLOUDSMITH_API_KEY }}
+          command: push
+          format: deb
+          owner: openhd
+          repo: ${{ steps.cloudsmith.outputs.repo }}
+          distro: any-distro
+          release: any-version
+          republish: "true"
+          file: openhd-glide_*_arm64.deb
+
+      - name: Publish for Debian Bullseye
+        if: github.event_name != 'pull_request'
+        uses: cloudsmith-io/action@v0.6.14
+        with:
+          api-key: ${{ secrets.CLOUDSMITH_API_KEY }}
+          command: push
+          format: deb
+          owner: openhd
+          repo: ${{ steps.cloudsmith.outputs.repo }}
+          distro: debian
+          release: bullseye
+          republish: "true"
+          file: openhd-glide_*_arm64.deb
+
+      - name: Publish for Debian Bookworm
+        if: github.event_name != 'pull_request'
+        uses: cloudsmith-io/action@v0.6.14
+        with:
+          api-key: ${{ secrets.CLOUDSMITH_API_KEY }}
+          command: push
+          format: deb
+          owner: openhd
+          repo: ${{ steps.cloudsmith.outputs.repo }}
+          distro: debian
+          release: bookworm
+          republish: "true"
+          file: openhd-glide_*_arm64.deb
+
+  cedar-platform-packages:
+    name: package-${{ matrix.package_suffix }}
     runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
       matrix:
         include:
-          - image_type: radxa-zero3w
-            package_suffix: radxa-zero3w
-            package_arch: arm64
-            cloudsmith_distro: debian
-            release: bullseye
-            radxa_repo_suite: direct-bullseye
-            require_rkmpp: "1"
-            extra_debian_depends: "gstreamer1.0-tools, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad, gstreamer1.0-plugins-ugly, gstreamer1.0-libav, gstreamer1.0-rockchip1, librockchip-mpp1, librga2"
           - image_type: orangepi-zero3w-lite
             package_suffix: orangepi-zero3w
             package_arch: arm64
             cloudsmith_distro: debian
             release: bookworm
             radxa_repo_suite: bookworm
-            require_rkmpp: "0"
             extra_debian_depends: "gstreamer1.0-tools, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad, gstreamer1.0-plugins-ugly, gstreamer1.0-libav"
           - image_type: radxa-cubie
             package_suffix: radxa-cubie
@@ -61,39 +158,9 @@ jobs:
             cloudsmith_distro: debian
             release: bullseye
             radxa_repo_suite: bullseye
-            require_rkmpp: "0"
             extra_debian_depends: "gstreamer1.0-tools, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad, gstreamer1.0-plugins-ugly, gstreamer1.0-libav"
-          - image_type: rock5a
-            package_suffix: rock5a
-            package_arch: arm64
-            cloudsmith_distro: debian
-            release: bullseye
-            radxa_repo_suite: direct-bullseye
-            require_rkmpp: "1"
-            extra_debian_depends: "gstreamer1.0-tools, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad, gstreamer1.0-plugins-ugly, gstreamer1.0-libav, gstreamer1.0-rockchip1, librockchip-mpp1, librga2"
-          - image_type: rock5b
-            package_suffix: rock5b
-            package_arch: arm64
-            cloudsmith_distro: debian
-            release: bullseye
-            radxa_repo_suite: direct-bullseye
-            require_rkmpp: "1"
-            extra_debian_depends: "gstreamer1.0-tools, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad, gstreamer1.0-plugins-ugly, gstreamer1.0-libav, gstreamer1.0-rockchip1, librockchip-mpp1, librga2"
-          - image_type: radxa-cm5
-            package_suffix: radxa-cm5
-            package_arch: arm64
-            cloudsmith_distro: debian
-            release: bookworm
-            radxa_repo_suite: rk3588-bookworm
-            require_rkmpp: "1"
-            extra_debian_depends: "gstreamer1.0-tools, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad, gstreamer1.0-plugins-ugly, gstreamer1.0-libav, gstreamer1.0-rockchip1, librockchip-mpp1, librga2"
-    env:
-      CLOUDSMITH_API_KEY: ${{ secrets.CLOUDSMITH_API_KEY }}
-      API_KEY: ${{ secrets.CLOUDSMITH_API_KEY }}
-      OPENHD_RCLONE_CONFIG_GDRIVE: ${{ secrets.OPENHD_GDRIVE_RCLONE_CONFIG }}
     steps:
-      - name: Maximize build space
-        uses: easimon/maximize-build-space@master
+      - uses: easimon/maximize-build-space@master
         with:
           root-reserve-mb: 512
           swap-size-mb: 1024
@@ -101,13 +168,10 @@ jobs:
           remove-android: "true"
           remove-haskell: "true"
           overprovision-lvm: "true"
-
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
-      - name: Build OpenHD-Glide in CHROOT
+      - name: Build native Cedar package in chroot
         env:
           GLIDE_IMAGE_TYPE: ${{ matrix.image_type }}
           GLIDE_PACKAGE_SUFFIX: ${{ matrix.package_suffix }}
@@ -115,31 +179,42 @@ jobs:
           GLIDE_CLOUDSMITH_DISTRO: ${{ matrix.cloudsmith_distro }}
           GLIDE_RELEASE: ${{ matrix.release }}
           GLIDE_RADXA_REPO_SUITE: ${{ matrix.radxa_repo_suite }}
-          GLIDE_REQUIRE_RKMPP: ${{ matrix.require_rkmpp }}
+          GLIDE_REQUIRE_RKMPP: "0"
           GLIDE_EXTRA_DEBIAN_DEPENDS: ${{ matrix.extra_debian_depends }}
+          CLOUDSMITH_API_KEY: ${{ secrets.CLOUDSMITH_API_KEY }}
+          API_KEY: ${{ secrets.CLOUDSMITH_API_KEY }}
         run: bash scripts/ci-build-platform-package.sh
-
       - name: Collect artifacts
-        run: |
-          find /opt/OpenHD-ChrootCompiler/out "$GITHUB_WORKSPACE"/chroot-out-* -maxdepth 1 -name '*.deb' -exec cp {} . \;
-
-      - name: Upload to Github
-        uses: "actions/upload-artifact@v4"
+        run: find /opt/OpenHD-ChrootCompiler/out "$GITHUB_WORKSPACE"/chroot-out-* -maxdepth 1 -name '*.deb' -exec cp {} . \;
+      - uses: actions/upload-artifact@v4
         with:
-          name: "OpenHD-Glide-${{ matrix.package_suffix }}-${{ matrix.release }}-${{ matrix.package_arch }}"
-          path: |
-            *.deb
-
-      - name: Push
-        if: env.CLOUDSMITH_API_KEY != '' && (github.ref_name == 'release' || github.ref_name == 'dev-release' || github.ref_name == 'main')
+          name: OpenHD-Glide-${{ matrix.package_suffix }}-${{ matrix.release }}
+          path: '*.deb'
+          if-no-files-found: error
+      - name: Publish Cedar package
+        if: github.event_name != 'pull_request'
         uses: cloudsmith-io/action@v0.6.14
         with:
           api-key: ${{ secrets.CLOUDSMITH_API_KEY }}
-          command: "push"
-          format: "deb"
-          owner: "openhd"
+          command: push
+          format: deb
+          owner: openhd
           repo: ${{ github.ref_name == 'main' && 'dev-release' || github.ref_name }}
-          distro: "${{ matrix.cloudsmith_distro }}"
-          release: "${{ matrix.release }}"
+          distro: ${{ matrix.cloudsmith_distro }}
+          release: ${{ matrix.release }}
           republish: "true"
-          file: "*.deb"
+          file: '*.deb'
+
+  trigger-images:
+    name: trigger-image-matrix
+    if: github.event_name == 'push'
+    needs: [architecture-package, cedar-platform-packages]
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Start ImageBuilder after packages are published
+        env:
+          GH_TOKEN: ${{ secrets.OPENHD_SUBMODULE_TOKEN }}
+        run: |
+          gh api --method POST \
+            /repos/OpenHD/OpenHD-ImageBuilder/actions/workflows/update-image.yml/dispatches \
+            -f ref=dev-release

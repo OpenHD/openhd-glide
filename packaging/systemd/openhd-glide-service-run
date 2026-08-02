@@ -48,6 +48,11 @@ is_rk3588() {
   grep -aq 'rockchip,rk3588' /proc/device-tree/compatible
 }
 
+is_rockchip() {
+  [ -r /proc/device-tree/compatible ] || return 1
+  grep -aq 'rockchip,' /proc/device-tree/compatible
+}
+
 detect_connected_mode() {
   for status in /sys/class/drm/card*-*/status; do
     [ -r "$status" ] || continue
@@ -161,7 +166,7 @@ binary_links_library() {
 }
 
 if [ "$VIDEO_BACKEND" = "auto" ]; then
-  if binary_links_library "librockchip_mpp"; then
+  if is_rockchip && binary_links_library "librockchip_mpp"; then
     VIDEO_BACKEND="rkmpp"
   elif binary_links_library "libvdecoder"; then
     VIDEO_BACKEND="cedar"
