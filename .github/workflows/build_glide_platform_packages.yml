@@ -42,7 +42,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             gcc-10-aarch64-linux-gnu g++-10-aarch64-linux-gnu \
-            cmake curl dpkg-dev file make mmdebstrap ninja-build pkg-config zstd
+            cmake curl debian-archive-keyring dpkg-dev file make mmdebstrap \
+            ninja-build pkg-config zstd
 
       - name: Fetch verified OpenHD ARM64 sysroot
         run: |
