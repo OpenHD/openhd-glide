@@ -34,11 +34,10 @@ cmake -S . -B "${build_dir}" \
   -DOPENHD_GLIDE_REQUIRE_FREETYPE=ON \
   -DOPENHD_GLIDE_REQUIRE_RKMPP=ON \
   -DOPENHD_GLIDE_PREFER_SYSTEM_MESA=OFF \
-  -DOPENHD_GLIDE_BUNDLE_RKMPP=ON \
   -DOPENHD_GLIDE_CROSS_PACKAGE=ON \
   -DOPENHD_GLIDE_PACKAGE_VERSION="${version}" \
   -DOPENHD_GLIDE_PACKAGE_ARCHITECTURE=arm64 \
-  -DOPENHD_GLIDE_EXTRA_DEBIAN_DEPENDS="gstreamer1.0-tools, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad, gstreamer1.0-plugins-ugly, gstreamer1.0-libav"
+  -DOPENHD_GLIDE_EXTRA_DEBIAN_DEPENDS="librockchip-mpp1, gstreamer1.0-tools, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad, gstreamer1.0-plugins-ugly, gstreamer1.0-libav"
 cmake --build "${build_dir}" --parallel "$(nproc)" --target package
 
 package="$(find "${build_dir}" -maxdepth 1 -name 'openhd-glide_*_arm64.deb' -print -quit)"

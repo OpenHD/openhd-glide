@@ -51,7 +51,6 @@ option(OPENHD_GLIDE_REQUIRE_GSTREAMER "Fail configure if GStreamer appsink/DMABU
 option(OPENHD_GLIDE_REQUIRE_FREETYPE "Fail configure if FreeType support is unavailable" OFF)
 option(OPENHD_GLIDE_REQUIRE_RKMPP "Fail configure if native Rockchip MPP support is unavailable" OFF)
 option(OPENHD_GLIDE_REQUIRE_IMXVPU "Fail configure if native i.MX VPU API 2 support is unavailable" OFF)
-option(OPENHD_GLIDE_BUNDLE_RKMPP "Bundle the Rockchip MPP runtime in the package-private library directory" OFF)
 option(OPENHD_GLIDE_CROSS_PACKAGE "Build a portable architecture package without host-side shlibdeps scanning" OFF)
 option(OPENHD_GLIDE_ENABLE_SDL2 "Enable the SDL2 development preview backend when available" ON)
 option(OPENHD_GLIDE_ENABLE_GSTREAMER "Enable GStreamer video paths when available" ON)
@@ -368,23 +367,6 @@ if(ROCKCHIP_MPP_LIBRARY)
     target_link_libraries(glide-rkmpp-rtp-probe PRIVATE ${ROCKCHIP_MPP_LIBRARY})
 else()
     target_compile_definitions(glide-rkmpp-rtp-probe PRIVATE OPENHD_GLIDE_HAS_RKMPP=0)
-endif()
-
-if(OPENHD_GLIDE_BUNDLE_RKMPP)
-    if(NOT ROCKCHIP_MPP_LIBRARY)
-        message(FATAL_ERROR "OPENHD_GLIDE_BUNDLE_RKMPP=ON but librockchip_mpp was not found")
-    endif()
-    get_filename_component(OPENHD_GLIDE_RKMPP_REAL_LIBRARY "${ROCKCHIP_MPP_LIBRARY}" REALPATH)
-    if(NOT EXISTS "${OPENHD_GLIDE_RKMPP_REAL_LIBRARY}")
-        message(FATAL_ERROR "Unable to resolve the Rockchip MPP runtime: ${ROCKCHIP_MPP_LIBRARY}")
-    endif()
-    install(
-        FILES "${OPENHD_GLIDE_RKMPP_REAL_LIBRARY}"
-        DESTINATION "${CMAKE_INSTALL_LIBDIR}/openhd-glide"
-        RENAME librockchip_mpp.so.1
-    )
-    set_property(TARGET openhd-glide glide-rkmpp-rtp-probe
-        PROPERTY INSTALL_RPATH "$ORIGIN/../${CMAKE_INSTALL_LIBDIR}/openhd-glide")
 endif()
 
 if(IMXVPUAPI2_FOUND AND IMXDMABUFFER_FOUND)

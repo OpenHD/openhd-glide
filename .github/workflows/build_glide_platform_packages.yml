@@ -72,10 +72,13 @@ jobs:
           dpkg-deb -f "${package}" Conflicts | grep -q openhd-glide-rock5a
           mkdir package-root
           dpkg-deb -x "${package}" package-root
-          test -f package-root/usr/lib/openhd-glide/librockchip_mpp.so.1
+          test ! -e package-root/usr/lib/openhd-glide/librockchip_mpp.so.1
           readelf -d package-root/usr/bin/openhd-glide | tee openhd-glide-needed.txt
           grep -q 'librockchip_mpp.so.1' openhd-glide-needed.txt
-          grep -q '\$ORIGIN/../lib/openhd-glide' openhd-glide-needed.txt
+          if grep -q '\$ORIGIN/../lib/openhd-glide' openhd-glide-needed.txt; then
+            echo 'Package must use the board-provided RKMPP runtime, not a bundled ABI.' >&2
+            exit 1
+          fi
           ar t "${package}" | grep -Eq '^control\.tar\.(gz|xz)$'
           ar t "${package}" | grep -qx data.tar.xz
 
