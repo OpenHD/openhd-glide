@@ -172,12 +172,17 @@ jobs:
         run: |
           if [[ "${GITHUB_REF_NAME}" == main || "${GITHUB_REF_NAME}" == openhd-3.0 ]]; then
             echo repo=dev-release >> "${GITHUB_OUTPUT}"
-          else
+            echo publish=true >> "${GITHUB_OUTPUT}"
+          elif [[ "${GITHUB_REF_NAME}" == dev-release || "${GITHUB_REF_NAME}" == release ]]; then
             echo "repo=${GITHUB_REF_NAME}" >> "${GITHUB_OUTPUT}"
+            echo publish=true >> "${GITHUB_OUTPUT}"
+          else
+            echo publish=false >> "${GITHUB_OUTPUT}"
+            echo "::notice::Package publication is disabled for ${GITHUB_REF_NAME}."
           fi
 
       - name: Publish universal package
-        if: github.event_name != 'pull_request'
+        if: steps.cloudsmith.outputs.publish == 'true'
         uses: cloudsmith-io/action@v0.6.14
         with:
           api-key: ${{ secrets.CLOUDSMITH_API_KEY }}
@@ -191,7 +196,7 @@ jobs:
           file: openhd-glide_*_${{ matrix.architecture }}.deb
 
       - name: Publish for primary build distribution
-        if: github.event_name != 'pull_request'
+        if: steps.cloudsmith.outputs.publish == 'true'
         uses: cloudsmith-io/action@v0.6.14
         with:
           api-key: ${{ secrets.CLOUDSMITH_API_KEY }}
@@ -205,7 +210,7 @@ jobs:
           file: openhd-glide_*_${{ matrix.architecture }}.deb
 
       - name: Publish ARM64 for Debian Bookworm
-        if: github.event_name != 'pull_request' && matrix.architecture == 'arm64'
+        if: steps.cloudsmith.outputs.publish == 'true' && matrix.architecture == 'arm64'
         uses: cloudsmith-io/action@v0.6.14
         with:
           api-key: ${{ secrets.CLOUDSMITH_API_KEY }}
@@ -219,7 +224,7 @@ jobs:
           file: openhd-glide_*_arm64.deb
 
       - name: Publish ARM64 for Raspbian Bullseye
-        if: github.event_name != 'pull_request' && matrix.architecture == 'arm64'
+        if: steps.cloudsmith.outputs.publish == 'true' && matrix.architecture == 'arm64'
         uses: cloudsmith-io/action@v0.6.14
         with:
           api-key: ${{ secrets.CLOUDSMITH_API_KEY }}
@@ -233,7 +238,7 @@ jobs:
           file: openhd-glide_*_arm64.deb
 
       - name: Publish ARM64 for Raspbian Bookworm
-        if: github.event_name != 'pull_request' && matrix.architecture == 'arm64'
+        if: steps.cloudsmith.outputs.publish == 'true' && matrix.architecture == 'arm64'
         uses: cloudsmith-io/action@v0.6.14
         with:
           api-key: ${{ secrets.CLOUDSMITH_API_KEY }}
@@ -247,7 +252,7 @@ jobs:
           file: openhd-glide_*_arm64.deb
 
       - name: Publish AMD64 for Ubuntu Noble
-        if: github.event_name != 'pull_request' && matrix.architecture == 'amd64'
+        if: steps.cloudsmith.outputs.publish == 'true' && matrix.architecture == 'amd64'
         uses: cloudsmith-io/action@v0.6.14
         with:
           api-key: ${{ secrets.CLOUDSMITH_API_KEY }}
@@ -316,14 +321,14 @@ jobs:
           path: '*.deb'
           if-no-files-found: error
       - name: Publish Cedar package
-        if: github.event_name != 'pull_request'
+        if: github.ref_name == 'main' || github.ref_name == 'openhd-3.0' || github.ref_name == 'dev-release' || github.ref_name == 'release'
         uses: cloudsmith-io/action@v0.6.14
         with:
           api-key: ${{ secrets.CLOUDSMITH_API_KEY }}
           command: push
           format: deb
           owner: openhd
-          repo: ${{ github.ref_name == 'main' && 'dev-release' || github.ref_name }}
+          repo: ${{ (github.ref_name == 'main' || github.ref_name == 'openhd-3.0') && 'dev-release' || github.ref_name }}
           distro: ${{ matrix.cloudsmith_distro }}
           release: ${{ matrix.release }}
           republish: "true"
