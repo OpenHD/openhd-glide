@@ -1,13 +1,25 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-architecture="${1:?Usage: build_portable_cross.sh <arm64> <sysroot> [build-dir]}"
-sysroot="$(realpath "${2:?Usage: build_portable_cross.sh <arm64> <sysroot> [build-dir]}")"
+architecture="${1:?Usage: build_portable_cross.sh <arm64|armhf> <sysroot> [build-dir]}"
+sysroot="$(realpath "${2:?Usage: build_portable_cross.sh <arm64|armhf> <sysroot> [build-dir]}")"
 build_dir="$(realpath -m "${3:-/tmp/openhd-glide-cross-${architecture}}")"
-if [[ "${architecture}" != "arm64" ]]; then
-  echo "Unsupported architecture: ${architecture}" >&2
-  exit 1
-fi
+case "${architecture}" in
+  arm64)
+    triplet="aarch64-linux-gnu"
+    require_rkmpp=ON
+    extra_debian_depends="librockchip-mpp1, gstreamer1.0-tools, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad, gstreamer1.0-plugins-ugly, gstreamer1.0-libav"
+    ;;
+  armhf)
+    triplet="arm-linux-gnueabihf"
+    require_rkmpp=OFF
+    extra_debian_depends="gstreamer1.0-tools, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad, gstreamer1.0-plugins-ugly, gstreamer1.0-libav"
+    ;;
+  *)
+    echo "Unsupported architecture: ${architecture}" >&2
+    exit 1
+    ;;
+esac
 case "${build_dir}" in
   /|/usr|/opt|/var|/home|"$(pwd)")
     echo "Refusing unsafe cross-build directory: ${build_dir}" >&2
@@ -16,10 +28,14 @@ case "${build_dir}" in
 esac
 
 test -f "${sysroot}/openhd-sysroot.manifest"
-grep -qx 'architecture=arm64' "${sysroot}/openhd-sysroot.manifest"
-command -v aarch64-linux-gnu-g++-10 >/dev/null
+grep -qx "architecture=${architecture}" "${sysroot}/openhd-sysroot.manifest"
+command -v "${triplet}-g++-10" >/dev/null
 export OPENHD_GLIDE_SYSROOT="${sysroot}"
-export OPENHD_GLIDE_CROSS_TRIPLET="aarch64-linux-gnu"
+export OPENHD_GLIDE_CROSS_TRIPLET="${triplet}"
+# Also export the canonical OpenHD names. The Glide toolchain accepts both so
+# callers can use one environment contract for OpenHD and OpenHD-Glide.
+export OPENHD_SYSROOT="${sysroot}"
+export OPENHD_CROSS_TRIPLET="${triplet}"
 version="${OPENHD_GLIDE_PACKAGE_VERSION:-0.1.0.${GITHUB_RUN_NUMBER:-0}}"
 
 rm -rf "${build_dir}"
@@ -32,15 +48,15 @@ cmake -S . -B "${build_dir}" \
   -DOPENHD_GLIDE_REQUIRE_KMS_GBM=ON \
   -DOPENHD_GLIDE_REQUIRE_GSTREAMER=ON \
   -DOPENHD_GLIDE_REQUIRE_FREETYPE=ON \
-  -DOPENHD_GLIDE_REQUIRE_RKMPP=ON \
+  -DOPENHD_GLIDE_REQUIRE_RKMPP="${require_rkmpp}" \
   -DOPENHD_GLIDE_PREFER_SYSTEM_MESA=OFF \
   -DOPENHD_GLIDE_CROSS_PACKAGE=ON \
   -DOPENHD_GLIDE_PACKAGE_VERSION="${version}" \
-  -DOPENHD_GLIDE_PACKAGE_ARCHITECTURE=arm64 \
-  -DOPENHD_GLIDE_EXTRA_DEBIAN_DEPENDS="librockchip-mpp1, gstreamer1.0-tools, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad, gstreamer1.0-plugins-ugly, gstreamer1.0-libav"
+  -DOPENHD_GLIDE_PACKAGE_ARCHITECTURE="${architecture}" \
+  -DOPENHD_GLIDE_EXTRA_DEBIAN_DEPENDS="${extra_debian_depends}"
 cmake --build "${build_dir}" --parallel "$(nproc)" --target package
 
-package="$(find "${build_dir}" -maxdepth 1 -name 'openhd-glide_*_arm64.deb' -print -quit)"
+package="$(find "${build_dir}" -maxdepth 1 -name "openhd-glide_*_${architecture}.deb" -print -quit)"
 test -n "${package}"
 dpkg-deb --info "${package}"
-echo "Portable ARM64 package built at ${package}"
+echo "Portable ${architecture} package built at ${package}"
