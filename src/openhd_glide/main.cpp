@@ -1357,7 +1357,6 @@ int run_kms_video_preview(const Options& options)
     ScopedThreadJoin async_flow_join { async_flow_thread };
     ScopedThreadJoin ui_buffer_join { ui_buffer_thread };
     RuntimeControlState control_state;
-    control_state.telemetry_connection = mavlink_bridge.connection_description();
     glide::mavlink::Snapshot mavlink_snapshot;
     std::mutex mavlink_snapshot_mutex;
     glide::ipc::Server ipc_server;
@@ -3077,6 +3076,7 @@ int run_preview_stack(char* argv0, const Options& options)
     }
     glide::mavlink::UdpBridge mavlink_bridge;
     start_mavlink_bridge(mavlink_bridge, options);
+    control_state.telemetry_connection = mavlink_bridge.connection_description();
     glide::net::DiscoveryService network_discovery;
     start_network_discovery(network_discovery, options);
 
