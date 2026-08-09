@@ -23,6 +23,7 @@
 
 #include "common/ipc.hpp"
 #include "common/logging.hpp"
+#include "common/mavlink_udp_bridge.hpp"
 #include "common/mavlink_state.hpp"
 #include "common/preview_control.hpp"
 #include "glide_ui/minimap_widget.hpp"
@@ -33,11 +34,13 @@
 #include "src/drivers/sdl/lv_sdl_keyboard.h"
 #include "src/drivers/sdl/lv_sdl_mouse.h"
 #include "src/drivers/sdl/lv_sdl_window.h"
+#include <SDL.h>
 #endif
 #endif
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <csignal>
 #include <cstdint>
@@ -53,6 +56,12 @@
 #include <thread>
 #include <vector>
 
+#if defined(_WIN32)
+#define NOMINMAX
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
+
 #if defined(__linux__)
 #include <fcntl.h>
 #include <linux/input.h>
@@ -64,6 +73,12 @@
 namespace {
 
 volatile std::sig_atomic_t stop_requested = 0;
+#if OPENHD_GLIDE_HAS_LVGL_SDL
+std::atomic<int> sdl_map_zoom_steps {};
+#if defined(_WIN32)
+std::atomic<bool> sdl_menu_toggle_requested {};
+#endif
+#endif
 
 void request_stop(int)
 {
@@ -191,9 +206,24 @@ struct UiState {
     glide::mavlink::Snapshot mavlink;
     bool fps_enabled { true };
     bool coordinates_enabled { true };
+    bool coordinates_before_map { true };
+    bool map_coordinates_suppressed {};
     bool compact_readouts { false };
     bool top_bar_enabled { true };
     std::string osd_layout { "drone" };
+    std::string telemetry_status { "Disconnected" };
+    std::string telemetry_host { "192.168.1.42" };
+    std::string map_position { "right" };
+    bool map_restore_open {};
+    bool map_expanded {};
+    int map_inner_x {};
+    int map_inner_y {};
+    int map_inner_width {};
+    int map_inner_height {};
+    // UDP/14550 is the safe default and works with OpenHD as well as the local
+    // GPS emulator. Only replace it with a TCP session after an explicit user
+    // action in the Telemetry panel.
+    bool telemetry_auto_connect { false };
     std::uint32_t theme_bar_text { 0xebf5ff };
     std::uint32_t theme_bar_background { 0x0e1318 };
     std::uint32_t theme_primary { 0x99ffb8 };
@@ -202,11 +232,13 @@ struct UiState {
     bool focus_panel {};
     bool panel_rebuild_pending {};
     OverlayMode overlay_mode { OverlayMode::hidden };
+    bool buffer_composition {};
     bool animate_menu_in {};
     int selected_row {};
     int row_count {};
     std::chrono::steady_clock::time_point next_control_file_poll {};
     std::chrono::steady_clock::time_point next_panel_rebuild {};
+    std::chrono::steady_clock::time_point next_telemetry_reconnect {};
     lv_obj_t* root {};
     SidebarPanel active_panel { SidebarPanel::dashboard };
     lv_obj_t* panel_title {};
@@ -221,6 +253,7 @@ struct UiState {
     lv_obj_t* top_bar_label {};
     lv_obj_t* osd_dropdown {};
     lv_obj_t* osd_label {};
+    lv_obj_t* map_position_dropdown {};
     std::array<lv_obj_t*, 4> theme_dropdowns {};
     std::array<lv_obj_t*, 4> theme_labels {};
     lv_obj_t* resolution_dropdown {};
@@ -233,10 +266,19 @@ struct UiState {
     lv_obj_t* flow_scale_label {};
     lv_obj_t* scan_bar {};
     lv_obj_t* scan_percent {};
+    lv_obj_t* telemetry_host_input {};
+    lv_obj_t* minimap_home_label {};
+    lv_obj_t* minimap_gps_label {};
+    lv_obj_t* minimap_zoom_label {};
+    lv_obj_t* minimap_scale_label {};
+    lv_obj_t* minimap_scale_bar {};
     lv_obj_t* nav_buttons[10] {};
     std::unique_ptr<glide::ui::MinimapWidget> minimap;
-    std::chrono::steady_clock::time_point minimap_started {};
     std::chrono::steady_clock::time_point minimap_last_render {};
+    std::vector<glide::ui::MinimapPosition> flight_path;
+    bool flight_home_valid {};
+    double flight_home_latitude_deg {};
+    double flight_home_longitude_deg {};
     std::chrono::steady_clock::time_point next_ipc_reconnect {};
     std::uint32_t glide_width { 1920 };
     std::uint32_t glide_height { 1080 };
@@ -249,6 +291,24 @@ struct UiState {
 };
 
 void dispatch_key(UiState& state, const char* key);
+glide::ui::MinimapPosition current_flight_position(const UiState& state);
+
+void send_gpu_map_state(UiState& state)
+{
+    if (!state.ipc.connected()) return;
+    if (!state.buffer_composition || state.overlay_mode != OverlayMode::minimap || !state.minimap) {
+        state.ipc.send_line("ui map hidden");
+        return;
+    }
+    const auto position = current_flight_position(state);
+    std::ostringstream line;
+    line << std::setprecision(10) << "ui map state 1 "
+         << state.map_inner_x << ' ' << state.map_inner_y << ' ' << state.map_inner_width << ' ' << state.map_inner_height << ' '
+         << state.minimap->zoom() << ' ' << state.minimap->pan_x() << ' ' << state.minimap->pan_y() << ' '
+         << position.latitude_deg << ' ' << position.longitude_deg << ' ' << position.heading_deg << ' '
+         << (state.flight_home_valid ? 1 : 0) << ' ' << state.flight_home_latitude_deg << ' ' << state.flight_home_longitude_deg;
+    state.ipc.send_line(line.str());
+}
 
 struct BufferDisplay {
     int fd { -1 };
@@ -256,6 +316,10 @@ struct BufferDisplay {
     std::uint32_t height {};
     std::size_t size {};
     void* map {};
+    void* map_base {};
+    void* file_handle {};
+    void* mapping_handle {};
+    volatile long* sequence {};
     std::vector<std::uint32_t> draw_buffer;
 };
 
@@ -295,6 +359,9 @@ void clear_active_buffer_display()
         return;
     }
     std::memset(active_buffer_display->map, 0, active_buffer_display->size);
+#if defined(_WIN32)
+    InterlockedIncrement(active_buffer_display->sequence);
+#endif
 #if defined(__linux__)
     msync(active_buffer_display->map, active_buffer_display->size, MS_ASYNC);
 #endif
@@ -302,6 +369,11 @@ void clear_active_buffer_display()
 
 void close_buffer_display(BufferDisplay& display)
 {
+#if defined(_WIN32)
+    if (display.map_base != nullptr) UnmapViewOfFile(display.map_base);
+    if (display.mapping_handle != nullptr) CloseHandle(display.mapping_handle);
+    if (display.file_handle != nullptr && display.file_handle != INVALID_HANDLE_VALUE) CloseHandle(display.file_handle);
+#endif
 #if defined(__linux__)
     if (display.map != nullptr && display.map != MAP_FAILED) {
         msync(display.map, display.size, MS_SYNC);
@@ -315,8 +387,9 @@ void close_buffer_display(BufferDisplay& display)
 }
 
 #if defined(__linux__)
-std::string linux_key_name(unsigned short code)
+std::string linux_key_name(unsigned short code, const std::array<bool, 768>& keys_down)
 {
+    const bool shift = keys_down[KEY_LEFTSHIFT] || keys_down[KEY_RIGHTSHIFT];
     switch (code) {
     case KEY_UP:
         return "up";
@@ -344,6 +417,12 @@ std::string linux_key_name(unsigned short code)
     case KEY_MINUS:
     case KEY_KPMINUS:
         return "-";
+    case KEY_102ND:
+        return shift ? ">" : "<";
+    case KEY_COMMA:
+        return shift ? "<" : "";
+    case KEY_DOT:
+        return shift ? ">" : "";
     default:
         return {};
     }
@@ -426,7 +505,7 @@ void poll_linux_keyboard(LinuxKeyboardInput& input, UiState& state, std::chrono:
                 continue;
             }
             input.keys_down[event.code] = true;
-            const auto key = linux_key_name(event.code);
+            const auto key = linux_key_name(event.code, input.keys_down);
             if (!key.empty()) {
                 dispatch_key(state, key.c_str());
             }
@@ -439,7 +518,49 @@ void poll_linux_keyboard(LinuxKeyboardInput&, UiState&, std::chrono::steady_cloc
 
 bool create_buffer_display(BufferDisplay& target, const Options& options)
 {
-#if defined(__linux__)
+#if defined(_WIN32)
+    close_buffer_display(target);
+    target.width = options.width;
+    target.height = options.height;
+    target.size = static_cast<std::size_t>(target.width) * target.height * sizeof(std::uint32_t);
+    constexpr std::size_t header_size = 16;
+    const auto mapping_size = target.size + header_size;
+    const auto file = CreateFileA(
+        options.buffer_path.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+        nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        glide::log(glide::LogLevel::error, "GlideUI", "failed to open shared UI buffer " + options.buffer_path);
+        return false;
+    }
+    LARGE_INTEGER size {};
+    size.QuadPart = static_cast<LONGLONG>(mapping_size);
+    if (!SetFilePointerEx(file, size, nullptr, FILE_BEGIN) || !SetEndOfFile(file)) {
+        CloseHandle(file);
+        glide::log(glide::LogLevel::error, "GlideUI", "failed to resize shared UI buffer " + options.buffer_path);
+        return false;
+    }
+    const auto mapping = CreateFileMappingA(file, nullptr, PAGE_READWRITE, 0, 0, nullptr);
+    const auto* base = mapping != nullptr ? MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, mapping_size) : nullptr;
+    if (base == nullptr) {
+        if (mapping != nullptr) CloseHandle(mapping);
+        CloseHandle(file);
+        glide::log(glide::LogLevel::error, "GlideUI", "failed to map shared UI buffer " + options.buffer_path);
+        return false;
+    }
+    target.file_handle = file;
+    target.mapping_handle = mapping;
+    target.map_base = const_cast<void*>(base);
+    auto* header = static_cast<std::uint32_t*>(target.map_base);
+    header[0] = 0x474C5549U; // GLUI
+    header[1] = target.width;
+    header[2] = target.height;
+    header[3] = 1;
+    target.sequence = reinterpret_cast<volatile long*>(&header[3]);
+    target.map = header + 4;
+    std::memset(target.map, 0, target.size);
+    target.draw_buffer.resize(static_cast<std::size_t>(target.width) * target.height);
+    return true;
+#elif defined(__linux__)
     close_buffer_display(target);
     target.width = options.width;
     target.height = options.height;
@@ -499,7 +620,11 @@ void buffer_flush(lv_display_t* display, const lv_area_t* area, unsigned char* p
                 destination_row[x] = (pixel != 0U && (pixel & 0xFF000000U) == 0U) ? (pixel | 0xFF000000U) : pixel;
             }
         }
+#if defined(__linux__)
         msync(target->map, target->size, MS_ASYNC);
+#elif defined(_WIN32)
+        InterlockedIncrement(target->sequence);
+#endif
     }
     lv_display_flush_ready(display);
 }
@@ -778,6 +903,122 @@ constexpr std::array<ColorPreset, 9> color_presets {{
 constexpr std::array<const char*, 4> theme_keys {{ "bar_text", "bar_background", "primary", "secondary" }};
 constexpr std::array<const char*, 4> theme_labels {{ "Font color", "Background color", "Primary color", "Secondary color" }};
 constexpr const char* glide_config_path = "/etc/default/openhd-glide";
+
+std::string trim(std::string value);
+
+std::filesystem::path telemetry_settings_path()
+{
+#if defined(_WIN32)
+    const char* base = std::getenv("LOCALAPPDATA");
+    if (base == nullptr || *base == '\0') {
+        base = std::getenv("APPDATA");
+    }
+    return (base != nullptr && *base != '\0')
+        ? std::filesystem::path(base) / "OpenHD-Glide" / "telemetry.conf"
+        : std::filesystem::path("telemetry.conf");
+#else
+    if (const char* xdg = std::getenv("XDG_CONFIG_HOME"); xdg != nullptr && *xdg != '\0') {
+        return std::filesystem::path(xdg) / "openhd-glide" / "telemetry.conf";
+    }
+    if (const char* home = std::getenv("HOME"); home != nullptr && *home != '\0') {
+        return std::filesystem::path(home) / ".config" / "openhd-glide" / "telemetry.conf";
+    }
+    return std::filesystem::path("telemetry.conf");
+#endif
+}
+
+std::filesystem::path map_settings_path()
+{
+#if defined(_WIN32)
+    const char* base = std::getenv("LOCALAPPDATA");
+    if (base == nullptr || *base == '\0') base = std::getenv("APPDATA");
+    return (base != nullptr && *base != '\0')
+        ? std::filesystem::path(base) / "OpenHD-Glide" / "map.conf"
+        : std::filesystem::path("map.conf");
+#else
+    if (const char* xdg = std::getenv("XDG_CONFIG_HOME"); xdg != nullptr && *xdg != '\0') {
+        return std::filesystem::path(xdg) / "openhd-glide" / "map.conf";
+    }
+    if (const char* home = std::getenv("HOME"); home != nullptr && *home != '\0') {
+        return std::filesystem::path(home) / ".config" / "openhd-glide" / "map.conf";
+    }
+    return std::filesystem::path("map.conf");
+#endif
+}
+
+constexpr std::array<const char*, 8> map_position_values {{
+    "top_left", "top", "top_right", "left", "right", "bottom_left", "bottom", "bottom_right"
+}};
+
+std::uint16_t map_position_index(const std::string& value)
+{
+    const auto found = std::find(map_position_values.begin(), map_position_values.end(), value);
+    return found == map_position_values.end()
+        ? 4U
+        : static_cast<std::uint16_t>(std::distance(map_position_values.begin(), found));
+}
+
+void load_map_settings(UiState& state)
+{
+    std::ifstream input(map_settings_path());
+    std::string line;
+    while (std::getline(input, line)) {
+        if (line.rfind("POSITION=", 0) == 0) {
+            const auto value = trim(line.substr(9));
+            if (std::find(map_position_values.begin(), map_position_values.end(), value) != map_position_values.end()) {
+                state.map_position = value;
+            }
+        } else if (line == "MAP_OPEN=1" || line == "MAP_OPEN=0") {
+            state.map_restore_open = line.back() == '1';
+        }
+    }
+}
+
+void persist_map_settings(const UiState& state)
+{
+    const auto path = map_settings_path();
+    std::error_code error;
+    if (path.has_parent_path()) std::filesystem::create_directories(path.parent_path(), error);
+    if (error) return;
+    std::ofstream output(path, std::ios::trunc);
+    if (output) {
+        output << "POSITION=" << state.map_position << '\n';
+        output << "MAP_OPEN=" << (state.map_restore_open ? '1' : '0') << '\n';
+    }
+}
+
+void load_telemetry_settings(UiState& state)
+{
+    std::ifstream input(telemetry_settings_path());
+    std::string line;
+    while (std::getline(input, line)) {
+        if (line.rfind("TCP_IP=", 0) == 0) {
+            const auto value = trim(line.substr(7));
+            if (!value.empty() && value.find_first_of(" \t\r\n") == std::string::npos) {
+                state.telemetry_host = value;
+            }
+        }
+    }
+}
+
+void persist_telemetry_host(const std::string& host)
+{
+    const auto path = telemetry_settings_path();
+    std::error_code error;
+    if (path.has_parent_path()) {
+        std::filesystem::create_directories(path.parent_path(), error);
+    }
+    if (error) {
+        glide::log(glide::LogLevel::error, "GlideUI", "failed to create telemetry settings directory: " + error.message());
+        return;
+    }
+    std::ofstream output(path, std::ios::trunc);
+    if (!output) {
+        glide::log(glide::LogLevel::error, "GlideUI", "failed to save telemetry IP to " + path.string());
+        return;
+    }
+    output << "TCP_IP=" << host << '\n';
+}
 
 struct ResolutionPreset {
     const char* label;
@@ -1238,14 +1479,18 @@ void build_overlay(UiState& state, std::uint32_t width, std::uint32_t height);
 
 bool panel_uses_mavlink(SidebarPanel panel)
 {
+    // The developer panel contains the TCP host editor and connect buttons.
+    // Rebuilding it for every heartbeat destroys the pressed/focused LVGL
+    // object between input down and input up, making clicks appear to do
+    // nothing. Network/connection state changes still refresh this panel via
+    // panel_uses_network().
     return panel == SidebarPanel::dashboard
         || panel == SidebarPanel::link
         || panel == SidebarPanel::video
         || panel == SidebarPanel::camera
         || panel == SidebarPanel::telemetry
         || panel == SidebarPanel::recording
-        || panel == SidebarPanel::system
-        || panel == SidebarPanel::developer;
+        || panel == SidebarPanel::system;
 }
 
 void request_panel_rebuild(UiState& state, std::chrono::steady_clock::time_point now)
@@ -1273,6 +1518,7 @@ void invalidate_ui_handles(UiState& state)
     state.top_bar_label = nullptr;
     state.osd_dropdown = nullptr;
     state.osd_label = nullptr;
+    state.map_position_dropdown = nullptr;
     state.theme_dropdowns.fill(nullptr);
     state.theme_labels.fill(nullptr);
     state.resolution_dropdown = nullptr;
@@ -1285,6 +1531,12 @@ void invalidate_ui_handles(UiState& state)
     state.flow_scale_label = nullptr;
     state.scan_bar = nullptr;
     state.scan_percent = nullptr;
+    state.telemetry_host_input = nullptr;
+    state.minimap_home_label = nullptr;
+    state.minimap_gps_label = nullptr;
+    state.minimap_zoom_label = nullptr;
+    state.minimap_scale_label = nullptr;
+    state.minimap_scale_bar = nullptr;
     for (auto& nav_button : state.nav_buttons) {
         nav_button = nullptr;
     }
@@ -1307,7 +1559,33 @@ void rebuild_ui(UiState& state)
 
 bool panel_uses_network(SidebarPanel panel)
 {
-    return panel == SidebarPanel::link || panel == SidebarPanel::system;
+    return panel == SidebarPanel::link || panel == SidebarPanel::system || panel == SidebarPanel::developer;
+}
+
+void suppress_separate_coordinates_for_map(UiState& state)
+{
+    if (state.map_coordinates_suppressed) return;
+    state.coordinates_before_map = state.coordinates_enabled;
+    state.map_coordinates_suppressed = true;
+    state.map_restore_open = true;
+    persist_map_settings(state);
+    if (state.coordinates_enabled) {
+        state.coordinates_enabled = false;
+        send_coordinates_state(state);
+    }
+}
+
+void restore_separate_coordinates_after_map(UiState& state)
+{
+    if (!state.map_coordinates_suppressed) return;
+    state.map_coordinates_suppressed = false;
+    state.map_restore_open = false;
+    state.map_expanded = false;
+    persist_map_settings(state);
+    if (state.coordinates_enabled != state.coordinates_before_map) {
+        state.coordinates_enabled = state.coordinates_before_map;
+        send_coordinates_state(state);
+    }
 }
 
 void show_menu(UiState& state)
@@ -1315,8 +1593,13 @@ void show_menu(UiState& state)
     if (state.overlay_mode == OverlayMode::menu) {
         return;
     }
+    if (state.overlay_mode == OverlayMode::minimap) restore_separate_coordinates_after_map(state);
     state.overlay_mode = OverlayMode::menu;
+#if defined(_WIN32)
+    state.animate_menu_in = false;
+#else
     state.animate_menu_in = true;
+#endif
     state.focus_panel = false;
     rebuild_ui(state);
 }
@@ -1327,6 +1610,7 @@ void hide_overlay(UiState& state)
         clear_active_buffer_display();
         return;
     }
+    if (state.overlay_mode == OverlayMode::minimap) restore_separate_coordinates_after_map(state);
     state.overlay_mode = OverlayMode::hidden;
     state.focus_panel = false;
     rebuild_ui(state);
@@ -1348,12 +1632,12 @@ void cycle_overlay_from_menu_key(UiState& state)
 
 void cycle_overlay_from_map_key(UiState& state)
 {
-    if (state.overlay_mode == OverlayMode::hidden) {
-        state.overlay_mode = OverlayMode::minimap;
-    } else if (state.overlay_mode == OverlayMode::minimap) {
-        state.overlay_mode = OverlayMode::menu;
-    } else {
+    if (state.overlay_mode == OverlayMode::minimap) {
+        restore_separate_coordinates_after_map(state);
         state.overlay_mode = OverlayMode::hidden;
+    } else {
+        suppress_separate_coordinates_for_map(state);
+        state.overlay_mode = OverlayMode::minimap;
     }
     state.focus_panel = false;
     rebuild_ui(state);
@@ -1385,14 +1669,21 @@ void apply_terminal_key(UiState& state, const std::string& line)
         cycle_overlay_from_map_key(state);
         return;
     }
-    if ((key == "+" || key == "=" || key == "zoom-in") && state.overlay_mode == OverlayMode::minimap && state.minimap) {
-        state.minimap->set_zoom(state.minimap->zoom() + 1);
-        state.minimap->render();
+    if ((key == "+" || key == "=" || key == ">" || key == "right" || key == "zoom-in") && state.overlay_mode == OverlayMode::minimap && state.minimap) {
+        state.minimap->set_zoom(state.minimap->zoom() + 0.25);
+        if (!state.buffer_composition) state.minimap->render();
+        send_gpu_map_state(state);
         return;
     }
-    if ((key == "-" || key == "_" || key == "zoom-out") && state.overlay_mode == OverlayMode::minimap && state.minimap) {
-        state.minimap->set_zoom(state.minimap->zoom() - 1);
-        state.minimap->render();
+    if ((key == "-" || key == "_" || key == "<" || key == "left" || key == "zoom-out") && state.overlay_mode == OverlayMode::minimap && state.minimap) {
+        state.minimap->set_zoom(state.minimap->zoom() - 0.25);
+        if (!state.buffer_composition) state.minimap->render();
+        send_gpu_map_state(state);
+        return;
+    }
+    if (key == "enter" && state.overlay_mode == OverlayMode::minimap) {
+        state.map_expanded = !state.map_expanded;
+        rebuild_ui(state);
         return;
     }
     if (state.overlay_mode == OverlayMode::hidden && key == "enter") {
@@ -1496,6 +1787,11 @@ void apply_terminal_key(UiState& state, const std::string& line)
             sync_coordinates_controls(state);
             send_coordinates_state(state);
         } else if (state.active_panel == SidebarPanel::osd && state.selected_row == 4) {
+            const auto next = static_cast<std::uint16_t>((map_position_index(state.map_position) + 1U) % map_position_values.size());
+            state.map_position = map_position_values[next];
+            if (state.map_position_dropdown != nullptr) lv_dropdown_set_selected(state.map_position_dropdown, next);
+            persist_map_settings(state);
+        } else if (state.active_panel == SidebarPanel::osd && state.selected_row == 5) {
             state.compact_readouts = !state.compact_readouts;
             sync_compact_readouts_controls(state);
             send_compact_readouts_state(state);
@@ -1544,10 +1840,12 @@ void keyboard_event(lv_event_t* event)
     }
 
     switch (lv_event_get_key(event)) {
+#if !defined(_WIN32)
     case 'm':
     case 'M':
         dispatch_key(*state, "m");
         break;
+#endif
     case 'n':
     case 'N':
         dispatch_key(*state, "n");
@@ -1560,6 +1858,12 @@ void keyboard_event(lv_event_t* event)
     case '_':
         dispatch_key(*state, "-");
         break;
+    case '<':
+        dispatch_key(*state, "<");
+        break;
+    case '>':
+        dispatch_key(*state, ">");
+        break;
     case LV_KEY_UP:
         dispatch_key(*state, "up");
         break;
@@ -1567,6 +1871,8 @@ void keyboard_event(lv_event_t* event)
         dispatch_key(*state, "down");
         break;
     case LV_KEY_LEFT:
+        dispatch_key(*state, "left");
+        break;
     case LV_KEY_ESC:
     case LV_KEY_BACKSPACE:
         dispatch_key(*state, "back");
@@ -1807,6 +2113,39 @@ void build_osd_panel(UiState& state)
         LV_EVENT_VALUE_CHANGED,
         &state);
     sync_coordinates_controls(state);
+
+    const int map_position_row_index = state.row_count++;
+    auto* map_position_row = lv_obj_create(state.panel_body);
+    set_panel_style(map_position_row, state.focus_panel && state.selected_row == map_position_row_index ? 0x2d210e : 0x0f2130, LV_OPA_80);
+    lv_obj_set_style_radius(map_position_row, 6, 0);
+    lv_obj_set_style_border_width(map_position_row, state.focus_panel && state.selected_row == map_position_row_index ? 1 : 0, 0);
+    lv_obj_set_style_border_color(map_position_row, color(0xff8a00), 0);
+    lv_obj_set_size(map_position_row, LV_PCT(100), 62);
+    lv_obj_set_style_pad_left(map_position_row, 16, 0);
+    lv_obj_set_style_pad_right(map_position_row, 16, 0);
+    lv_obj_set_flex_flow(map_position_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(map_position_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+    label(map_position_row, "Map position", &lv_font_montserrat_16, 0xdce8f0);
+    state.map_position_dropdown = lv_dropdown_create(map_position_row);
+    lv_dropdown_set_options(
+        state.map_position_dropdown,
+        "Top Left\nTop\nTop Right\nLeft\nRight\nBottom Left\nBottom\nBottom Right");
+    lv_dropdown_set_selected(state.map_position_dropdown, map_position_index(state.map_position));
+    lv_obj_set_size(state.map_position_dropdown, 160, 38);
+    lv_obj_set_style_bg_color(state.map_position_dropdown, color(0x162a3a), 0);
+    lv_obj_set_style_text_color(state.map_position_dropdown, color(0xffffff), 0);
+    lv_obj_add_event_cb(
+        state.map_position_dropdown,
+        [](lv_event_t* event) {
+            auto* state = static_cast<UiState*>(lv_event_get_user_data(event));
+            const auto selected = std::min<std::size_t>(
+                lv_dropdown_get_selected(state->map_position_dropdown), map_position_values.size() - 1U);
+            state->map_position = map_position_values[selected];
+            persist_map_settings(*state);
+        },
+        LV_EVENT_VALUE_CHANGED,
+        &state);
 
     const int compact_row_index = state.row_count++;
     auto* compact_row = lv_obj_create(state.panel_body);
@@ -2232,6 +2571,71 @@ void build_rc_panel(UiState& state)
 void build_status_panel(UiState& state)
 {
     setup_panel_column(state.panel_body, 12);
+    value_row(
+        state,
+        "Telemetry Link",
+        state.telemetry_status,
+        state.telemetry_status.rfind("Error", 0) == 0 ? 0xdf4c7c
+            : (state.telemetry_status == "Disconnected" ? 0xff8a00 : 0x20b383));
+
+    auto* endpoint_row = lv_obj_create(state.panel_body);
+    set_panel_style(endpoint_row, 0x0d1b27, LV_OPA_70);
+    lv_obj_set_size(endpoint_row, LV_PCT(100), 48);
+    lv_obj_set_style_pad_all(endpoint_row, 6, 0);
+    lv_obj_set_style_pad_column(endpoint_row, 6, 0);
+    lv_obj_set_flex_flow(endpoint_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(endpoint_row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+    auto* protocol = lv_label_create(endpoint_row);
+    lv_label_set_text(protocol, "TCP");
+    lv_obj_set_width(protocol, 46);
+    lv_obj_set_style_text_color(protocol, color(0xffffff), 0);
+
+    state.telemetry_host_input = lv_textarea_create(endpoint_row);
+    lv_textarea_set_one_line(state.telemetry_host_input, true);
+    lv_textarea_set_accepted_chars(state.telemetry_host_input, "0123456789.");
+    lv_textarea_set_max_length(state.telemetry_host_input, 15);
+    lv_textarea_set_placeholder_text(state.telemetry_host_input, "Ground-unit IP");
+    lv_textarea_set_text(state.telemetry_host_input, state.telemetry_host.c_str());
+    lv_obj_set_size(state.telemetry_host_input, 220, 36);
+    lv_obj_set_style_bg_color(state.telemetry_host_input, color(0x162a3a), 0);
+    lv_obj_set_style_text_color(state.telemetry_host_input, color(0xffffff), 0);
+
+    auto* port = lv_label_create(endpoint_row);
+    const auto port_text = std::string(":") + std::to_string(glide::mavlink::openhd_ground_tcp_port);
+    lv_label_set_text(port, port_text.c_str());
+    lv_obj_set_style_text_color(port, color(0xb3c6d6), 0);
+
+    auto* connect = action_button(state, "CONNECT TCP");
+    lv_obj_add_event_cb(
+        connect,
+        [](lv_event_t* event) {
+            auto* state = static_cast<UiState*>(lv_event_get_user_data(event));
+            if (state == nullptr || state->telemetry_host_input == nullptr) return;
+            state->telemetry_host = trim(lv_textarea_get_text(state->telemetry_host_input));
+            if (state->telemetry_host.empty()) return;
+            persist_telemetry_host(state->telemetry_host);
+            state->telemetry_auto_connect = true;
+            state->next_telemetry_reconnect = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+            state->telemetry_status = "Connecting...";
+            state->ipc.send_line(std::string("net telemetry connect tcp ") + state->telemetry_host);
+        },
+        LV_EVENT_CLICKED,
+        &state);
+
+    auto* disconnect = action_button(state, "DISCONNECT TELEMETRY");
+    lv_obj_add_event_cb(
+        disconnect,
+        [](lv_event_t* event) {
+            auto* state = static_cast<UiState*>(lv_event_get_user_data(event));
+            if (state != nullptr) {
+                state->telemetry_auto_connect = false;
+                state->ipc.send_line("net telemetry disconnect");
+            }
+        },
+        LV_EVENT_CLICKED,
+        &state);
+
     const auto connection = state.mavlink.air_alive && state.mavlink.ground_alive
         ? std::string("Connected")
         : (state.mavlink.air_alive ? std::string("AIR only") : (state.mavlink.ground_alive ? std::string("GND only") : std::string("Not connected")));
@@ -2281,6 +2685,7 @@ void clear_panel(UiState& state)
     state.top_bar_label = nullptr;
     state.osd_dropdown = nullptr;
     state.osd_label = nullptr;
+    state.map_position_dropdown = nullptr;
     state.theme_dropdowns.fill(nullptr);
     state.theme_labels.fill(nullptr);
     state.resolution_dropdown = nullptr;
@@ -2364,10 +2769,15 @@ void send_initial_ipc_requests(UiState& state, const char* backend_name)
     state.ipc.send_line("get osd");
     state.ipc.send_line("get theme");
     state.ipc.send_line("get net");
+    state.ipc.send_line("get telemetry connection");
 }
 
 bool apply_network_state_line(UiState& state, const std::string& line)
 {
+    if (line.rfind("state telemetry ", 0) == 0) {
+        state.telemetry_status = line.substr(std::string("state telemetry ").size());
+        return true;
+    }
     if (line == "state net idle") {
         state.net_scanning = false;
         state.net_status = "Idle";
@@ -2447,7 +2857,14 @@ void build_sidebar(UiState& state, std::uint32_t width, std::uint32_t height)
 {
     auto* screen = lv_screen_active();
     state.root = screen;
+#if defined(_WIN32)
+    // The native Windows preview is an ordinary opaque popup window, not a
+    // per-pixel alpha plane. Clear it completely on every menu rebuild so old
+    // LVGL animation frames cannot remain visible as trails.
+    set_panel_style(screen, 0x000000, state.buffer_composition ? LV_OPA_TRANSP : LV_OPA_COVER);
+#else
     set_panel_style(screen, 0x000000, LV_OPA_TRANSP);
+#endif
 
     const int safe_width = static_cast<int>(std::max<std::uint32_t>(width, 220));
     const int safe_height = static_cast<int>(std::max<std::uint32_t>(height, 360));
@@ -2606,32 +3023,130 @@ void build_minimap_card(UiState& state, std::uint32_t width, std::uint32_t heigh
 
     const int safe_width = static_cast<int>(std::max<std::uint32_t>(width, 220));
     const int safe_height = static_cast<int>(std::max<std::uint32_t>(height, 220));
-    const int diameter = std::clamp(std::min(safe_width, safe_height) - 32, 180, 360);
+    // Keep the map glanceable without covering the video: half of the former
+    // width and height gives approximately one quarter of the screen area.
+    int map_width = std::clamp((safe_width - 40) / 2, 180, 360);
+    int map_height = std::min(std::max(100, map_width * 9 / 16), std::max(100, (safe_height - 40) / 2));
+    if (state.map_expanded) {
+        map_width = std::max(320, safe_width - 120);
+        map_height = std::max(180, safe_height - 100);
+    }
+
+    lv_align_t map_align = state.map_expanded ? LV_ALIGN_CENTER : LV_ALIGN_RIGHT_MID;
+    int map_x = -20;
+    int map_y = 0;
+    if (state.map_expanded) {
+        map_x = 0;
+        map_y = 0;
+    } else if (state.map_position == "top_left") {
+        map_align = LV_ALIGN_TOP_LEFT;
+        map_x = 20;
+        map_y = 52;
+    } else if (state.map_position == "top") {
+        map_align = LV_ALIGN_TOP_MID;
+        map_x = 0;
+        map_y = 52;
+    } else if (state.map_position == "top_right") {
+        map_align = LV_ALIGN_TOP_RIGHT;
+        map_x = -20;
+        map_y = 52;
+    } else if (state.map_position == "left") {
+        map_align = LV_ALIGN_LEFT_MID;
+        map_x = 20;
+    } else if (state.map_position == "bottom_left") {
+        map_align = LV_ALIGN_BOTTOM_LEFT;
+        map_x = 20;
+        map_y = -42;
+    } else if (state.map_position == "bottom") {
+        map_align = LV_ALIGN_BOTTOM_MID;
+        map_x = 0;
+        map_y = -42;
+    } else if (state.map_position == "bottom_right") {
+        map_align = LV_ALIGN_BOTTOM_RIGHT;
+        map_x = -20;
+        map_y = -42;
+    }
 
     auto* shadow = lv_obj_create(screen);
     set_panel_style(shadow, 0x000000, LV_OPA_50);
-    lv_obj_set_style_radius(shadow, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_size(shadow, diameter + 18, diameter + 18);
-    lv_obj_align(shadow, LV_ALIGN_BOTTOM_LEFT, 16, -16);
+    lv_obj_set_style_radius(shadow, 10, 0);
+    lv_obj_set_size(shadow, map_width + 12, map_height + 12);
+    lv_obj_align(shadow, map_align, map_x + 4, map_y + 5);
 
     auto* frame = lv_obj_create(screen);
-    set_panel_style(frame, 0x050808, LV_OPA_COVER);
-    lv_obj_set_style_radius(frame, LV_RADIUS_CIRCLE, 0);
+    set_panel_style(frame, 0x090e0f, state.buffer_composition ? LV_OPA_TRANSP : LV_OPA_90);
+    lv_obj_set_style_radius(frame, 18, 0);
     lv_obj_set_style_border_width(frame, 2, 0);
-    lv_obj_set_style_border_color(frame, color(0xe9d8b5), 0);
-    lv_obj_set_style_pad_all(frame, 8, 0);
-    lv_obj_set_size(frame, diameter, diameter);
-    lv_obj_align(frame, LV_ALIGN_BOTTOM_LEFT, 20, -20);
+    lv_obj_set_style_border_color(frame, color(0xb84325), 0);
+    lv_obj_set_style_pad_all(frame, 2, 0);
+    lv_obj_set_size(frame, map_width, map_height);
+    lv_obj_align(frame, map_align, map_x, map_y);
 
     glide::ui::MinimapOptions options;
     options.tile_root = std::getenv("GLIDE_MINIMAP_TILE_ROOT") != nullptr ? std::getenv("GLIDE_MINIMAP_TILE_ROOT") : "assets/maps";
     options.zoom = std::getenv("GLIDE_MINIMAP_ZOOM") != nullptr ? std::stoi(std::getenv("GLIDE_MINIMAP_ZOOM")) : 15;
     options.grid_tiles = std::getenv("GLIDE_MINIMAP_GRID") != nullptr ? std::stoi(std::getenv("GLIDE_MINIMAP_GRID")) : 5;
-    options.round = true;
-    state.minimap = std::make_unique<glide::ui::MinimapWidget>(frame, diameter - 16, diameter - 16, options);
+    options.round = false;
+    options.render_on_interaction = !state.buffer_composition;
+    state.minimap = std::make_unique<glide::ui::MinimapWidget>(frame, map_width - 4, map_height - 4, options);
     lv_obj_center(state.minimap->object());
-    state.minimap_started = std::chrono::steady_clock::now();
+    if (state.buffer_composition) lv_obj_set_style_opa(state.minimap->object(), LV_OPA_TRANSP, 0);
+    lv_obj_update_layout(frame);
+    state.map_inner_x = lv_obj_get_x(frame) + 2;
+    state.map_inner_y = lv_obj_get_y(frame) + 2;
+    state.map_inner_width = map_width - 4;
+    state.map_inner_height = map_height - 4;
+
+    state.minimap_home_label = lv_label_create(frame);
+    lv_label_set_text(state.minimap_home_label, "HOME\n--m");
+    lv_obj_set_style_text_align(state.minimap_home_label, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_obj_set_style_text_color(state.minimap_home_label, color(0xe95827), 0);
+    lv_obj_set_style_text_font(state.minimap_home_label, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_bg_color(state.minimap_home_label, color(0x090e0f), 0);
+    lv_obj_set_style_bg_opa(state.minimap_home_label, LV_OPA_70, 0);
+    lv_obj_set_style_pad_all(state.minimap_home_label, 3, 0);
+    lv_obj_align(state.minimap_home_label, LV_ALIGN_TOP_RIGHT, -10, 8);
+
+    state.minimap_gps_label = lv_label_create(frame);
+    lv_label_set_text(state.minimap_gps_label, "GPS --\n--\n--");
+    lv_obj_set_style_text_color(state.minimap_gps_label, color(0xaab2b2), 0);
+    lv_obj_set_style_text_font(state.minimap_gps_label, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_bg_color(state.minimap_gps_label, color(0x090e0f), 0);
+    lv_obj_set_style_bg_opa(state.minimap_gps_label, LV_OPA_70, 0);
+    lv_obj_set_style_pad_all(state.minimap_gps_label, 3, 0);
+    lv_obj_align(state.minimap_gps_label, LV_ALIGN_TOP_LEFT, 10, 8);
+
+    state.minimap_zoom_label = lv_label_create(frame);
+    lv_label_set_text(state.minimap_zoom_label, "Z15");
+    lv_obj_set_style_text_color(state.minimap_zoom_label, color(0xaab2b2), 0);
+    lv_obj_set_style_text_font(state.minimap_zoom_label, &lv_font_montserrat_12, 0);
+    lv_obj_align(state.minimap_zoom_label, LV_ALIGN_BOTTOM_LEFT, 10, -7);
+
+    state.minimap_scale_label = lv_label_create(frame);
+    lv_label_set_text(state.minimap_scale_label, "250m");
+    lv_obj_set_style_text_color(state.minimap_scale_label, color(0xb8c0c0), 0);
+    lv_obj_set_style_text_font(state.minimap_scale_label, &lv_font_montserrat_12, 0);
+    lv_obj_align(state.minimap_scale_label, LV_ALIGN_BOTTOM_MID, 0, -9);
+
+    state.minimap_scale_bar = lv_obj_create(frame);
+    set_panel_style(state.minimap_scale_bar, 0x8b9494, LV_OPA_80);
+    lv_obj_set_style_radius(state.minimap_scale_bar, 0, 0);
+    lv_obj_set_size(state.minimap_scale_bar, 90, 2);
+    lv_obj_align(state.minimap_scale_bar, LV_ALIGN_BOTTOM_MID, 0, -4);
+
+    auto* attribution = lv_label_create(frame);
+    lv_label_set_text(attribution, "OSM");
+    lv_obj_set_style_text_color(attribution, color(0x586263), 0);
+    lv_obj_set_style_text_font(attribution, &lv_font_montserrat_12, 0);
+    lv_obj_align(attribution, LV_ALIGN_BOTTOM_RIGHT, -8, -7);
+    if (state.flight_home_valid) {
+        state.minimap->set_home(state.flight_home_latitude_deg, state.flight_home_longitude_deg);
+    }
+    for (const auto& position : state.flight_path) {
+        state.minimap->set_position(position);
+    }
     state.minimap_last_render = {};
+    send_gpu_map_state(state);
 }
 
 void build_overlay(UiState& state, std::uint32_t width, std::uint32_t height)
@@ -2648,6 +3163,48 @@ void build_overlay(UiState& state, std::uint32_t width, std::uint32_t height)
         build_minimap_card(state, width, height);
     } else {
         clear_active_buffer_display();
+        send_gpu_map_state(state);
+    }
+}
+
+glide::ui::MinimapPosition current_flight_position(const UiState& state)
+{
+    return glide::ui::MinimapPosition {
+        .latitude_deg = state.mavlink.latitude_deg,
+        .longitude_deg = state.mavlink.longitude_deg,
+        .heading_deg = state.mavlink.attitude_valid
+            ? std::fmod(state.mavlink.yaw_degrees + 360.0F, 360.0F)
+            : 0.0F,
+    };
+}
+
+void record_flight_position(UiState& state)
+{
+    if (!state.mavlink.position_valid) {
+        return;
+    }
+    const auto position = current_flight_position(state);
+    if (!state.flight_home_valid) {
+        state.flight_home_valid = true;
+        state.flight_home_latitude_deg = position.latitude_deg;
+        state.flight_home_longitude_deg = position.longitude_deg;
+    }
+
+    bool append = state.flight_path.empty();
+    if (!append) {
+        constexpr double meters_per_degree = 111320.0;
+        const auto& previous = state.flight_path.back();
+        const double mean_latitude = (previous.latitude_deg + position.latitude_deg) * 0.5 * 3.14159265358979323846 / 180.0;
+        const double north_m = (position.latitude_deg - previous.latitude_deg) * meters_per_degree;
+        const double east_m = (position.longitude_deg - previous.longitude_deg) * meters_per_degree * std::cos(mean_latitude);
+        append = std::hypot(north_m, east_m) >= 2.0;
+    }
+    if (!append) {
+        return;
+    }
+    state.flight_path.push_back(position);
+    if (state.flight_path.size() > 2000) {
+        state.flight_path.erase(state.flight_path.begin(), state.flight_path.begin() + 500);
     }
 }
 
@@ -2659,20 +3216,46 @@ void update_minimap(UiState& state, std::chrono::steady_clock::time_point now)
     if (state.minimap_last_render.time_since_epoch().count() != 0 && now - state.minimap_last_render < std::chrono::milliseconds(100)) {
         return;
     }
-    constexpr double home_lat = 38.8976763;
-    constexpr double home_lon = -77.0365298;
-    const double seconds = std::chrono::duration<double>(now - state.minimap_started).count();
-    const double progress = std::min(1.0, seconds / 240.0);
-    const double eased = progress * progress * (3.0 - 2.0 * progress);
-    constexpr double city_lat = 38.8951100;
-    constexpr double city_lon = -77.0219570;
-    state.minimap->set_home(home_lat, home_lon);
-    state.minimap->set_position(glide::ui::MinimapPosition {
-        .latitude_deg = home_lat + (city_lat - home_lat) * eased,
-        .longitude_deg = home_lon + (city_lon - home_lon) * eased,
-        .heading_deg = 102.0F,
-    });
-    state.minimap->render();
+    if (state.mavlink.position_valid) {
+        state.minimap->set_home(state.flight_home_latitude_deg, state.flight_home_longitude_deg);
+        state.minimap->set_position(current_flight_position(state));
+    }
+    if (state.minimap_home_label != nullptr) {
+        const auto distance = static_cast<int>(std::lround(state.minimap->home_distance_m()));
+        const auto text = std::string("HOME\n") + std::to_string(distance) + "m";
+        lv_label_set_text(state.minimap_home_label, text.c_str());
+    }
+    if (state.minimap_gps_label != nullptr && state.mavlink.position_valid) {
+        std::ostringstream gps;
+        gps << "GPS " << state.mavlink.satellites << '\n'
+            << std::fixed << std::setprecision(5) << state.mavlink.latitude_deg << '\n'
+            << std::fixed << std::setprecision(5) << state.mavlink.longitude_deg;
+        lv_label_set_text(state.minimap_gps_label, gps.str().c_str());
+    }
+    if (state.minimap_zoom_label != nullptr) {
+        const auto text = std::string("Z") + std::to_string(static_cast<int>(std::lround(state.minimap->zoom())));
+        lv_label_set_text(state.minimap_zoom_label, text.c_str());
+    }
+    if (state.minimap_scale_label != nullptr && state.minimap_scale_bar != nullptr) {
+        static constexpr std::array<int, 9> scale_steps {{ 10, 25, 50, 100, 250, 500, 1000, 2500, 5000 }};
+        const double target_m = state.minimap->meters_per_pixel() * 90.0;
+        int scale_m = scale_steps.front();
+        for (const auto candidate : scale_steps) {
+            if (candidate <= target_m) scale_m = candidate;
+        }
+        const int scale_pixels = std::clamp(
+            static_cast<int>(std::lround(static_cast<double>(scale_m) / state.minimap->meters_per_pixel())),
+            35,
+            130);
+        const auto text = scale_m >= 1000
+            ? std::to_string(scale_m / 1000) + "km"
+            : std::to_string(scale_m) + "m";
+        lv_label_set_text(state.minimap_scale_label, text.c_str());
+        lv_obj_set_width(state.minimap_scale_bar, scale_pixels);
+        lv_obj_align(state.minimap_scale_bar, LV_ALIGN_BOTTOM_MID, 0, -4);
+    }
+    if (!state.buffer_composition) state.minimap->render();
+    send_gpu_map_state(state);
     state.minimap_last_render = now;
 }
 
@@ -2781,6 +3364,13 @@ void poll_ipc(UiState& state, std::chrono::steady_clock::time_point now)
     if (state.panel_rebuild_pending && now >= state.next_panel_rebuild) {
         set_active_panel(state, state.active_panel);
     }
+    if (state.telemetry_auto_connect && state.ipc.connected()
+        && state.telemetry_status.rfind("TCP ", 0) != 0
+        && now >= state.next_telemetry_reconnect) {
+        state.next_telemetry_reconnect = now + std::chrono::seconds(3);
+        state.telemetry_status = "Connecting...";
+        state.ipc.send_line(std::string("net telemetry connect tcp ") + state.telemetry_host);
+    }
 }
 
 void set_sdl_position(const Options& options)
@@ -2789,8 +3379,87 @@ void set_sdl_position(const Options& options)
         return;
     }
     const auto position = std::to_string(options.x) + "," + std::to_string(options.y);
+#if defined(_WIN32)
+    _putenv_s("SDL_VIDEO_WINDOW_POS", position.c_str());
+#else
     setenv("SDL_VIDEO_WINDOW_POS", position.c_str(), 1);
+#endif
 }
+
+#if OPENHD_GLIDE_HAS_LVGL_SDL
+int global_sdl_key_watch(void*, SDL_Event* event)
+{
+    if (event != nullptr && event->type == SDL_MOUSEWHEEL && event->wheel.y != 0) {
+        sdl_map_zoom_steps.fetch_add(event->wheel.y, std::memory_order_release);
+    }
+    if (event != nullptr && event->type == SDL_KEYDOWN && event->key.repeat == 0) {
+        const auto key = event->key.keysym.sym;
+        const auto scan = event->key.keysym.scancode;
+        const bool shift = (event->key.keysym.mod & KMOD_SHIFT) != 0;
+        int zoom_step = 0;
+        if (key == SDLK_GREATER || (key == SDLK_PERIOD && shift)) {
+            zoom_step = 1;
+        } else if (key == SDLK_LESS || scan == SDL_SCANCODE_NONUSBACKSLASH) {
+            zoom_step = shift ? 1 : -1;
+        } else if (key == SDLK_COMMA && shift) {
+            zoom_step = -1;
+        }
+        if (zoom_step != 0) {
+            sdl_map_zoom_steps.fetch_add(zoom_step, std::memory_order_release);
+        }
+    }
+#if defined(_WIN32)
+    if (event != nullptr && event->type == SDL_KEYDOWN && event->key.repeat == 0
+        && event->key.keysym.sym == SDLK_m) {
+        sdl_menu_toggle_requested.store(true, std::memory_order_release);
+    }
+#endif
+    return 0;
+}
+
+SDL_Window* find_preview_sdl_window()
+{
+    for (std::uint32_t id = 1; id < 128; ++id) {
+        auto* window = SDL_GetWindowFromID(id);
+        if (window != nullptr && std::string(SDL_GetWindowTitle(window)) == "GlideUI LVGL Preview") return window;
+    }
+    return nullptr;
+}
+
+void configure_sdl_window(const Options& options)
+{
+    // LVGL does not expose its SDL_Window in this pinned release. Locate the
+    // just-created window by its unique title and apply the layer properties.
+    if (auto* window = find_preview_sdl_window(); window != nullptr) {
+        SDL_SetWindowBordered(window, options.borderless ? SDL_FALSE : SDL_TRUE);
+        SDL_SetWindowAlwaysOnTop(window, options.always_on_top ? SDL_TRUE : SDL_FALSE);
+        SDL_SetWindowOpacity(window, options.opacity);
+#if defined(_WIN32)
+        // The Flow window owns keyboard focus while the menu is closed. This
+        // avoids a permanently stacked black/translucent SDL window on the
+        // Windows desktop compositor.
+        SDL_HideWindow(window);
+#endif
+    }
+}
+
+void sync_sdl_window_visibility(bool visible)
+{
+#if defined(_WIN32)
+    if (auto* window = find_preview_sdl_window(); window != nullptr) {
+        const auto shown = (SDL_GetWindowFlags(window) & SDL_WINDOW_SHOWN) != 0;
+        if (visible && !shown) {
+            SDL_ShowWindow(window);
+            SDL_RaiseWindow(window);
+        } else if (!visible && shown) {
+            SDL_HideWindow(window);
+        }
+    }
+#else
+    (void)visible;
+#endif
+}
+#endif
 
 } // namespace
 
@@ -2812,6 +3481,10 @@ int main(int argc, char** argv)
         return 0;
     }
 
+#if OPENHD_GLIDE_HAS_LVGL_SDL && defined(_WIN32)
+    SDL_SetHint("SDL_WINDOWS_DPI_AWARENESS", "permonitorv2");
+    SDL_SetHint("SDL_WINDOWS_DPI_SCALING", "0");
+#endif
     set_sdl_position(options);
     lv_init();
     BufferDisplay buffer_display;
@@ -2821,11 +3494,13 @@ int main(int argc, char** argv)
         auto* display = lv_sdl_window_create(static_cast<int32_t>(options.width), static_cast<int32_t>(options.height));
         lv_sdl_window_set_title(display, "GlideUI LVGL Preview");
         lv_sdl_window_set_resizeable(display, false);
+        configure_sdl_window(options);
         lv_sdl_mouse_create();
         auto* keyboard = lv_sdl_keyboard_create();
         auto* group = lv_group_create();
         lv_group_set_default(group);
         lv_indev_set_group(keyboard, group);
+        SDL_AddEventWatch(global_sdl_key_watch, nullptr);
     }
 #else
     if (options.preview) {
@@ -2852,6 +3527,7 @@ int main(int argc, char** argv)
     }
 
     UiState state;
+    state.buffer_composition = options.buffer;
     state.ipc_socket = options.ipc_socket;
     state.fps_enabled = glide::preview_control::fps_overlay_enabled();
     state.coordinates_enabled = glide::preview_control::coordinates_overlay_enabled();
@@ -2859,6 +3535,8 @@ int main(int argc, char** argv)
     state.top_bar_enabled = glide::preview_control::top_bar_enabled();
     state.osd_layout = glide::preview_control::osd_layout();
     load_device_settings(state);
+    load_telemetry_settings(state);
+    load_map_settings(state);
     for (std::size_t i = 0; i < theme_keys.size(); ++i) {
         theme_color_ref(state, i) = glide::preview_control::theme_color(theme_keys[i]);
     }
@@ -2876,6 +3554,10 @@ int main(int argc, char** argv)
         glide::log(glide::LogLevel::warning, "GlideUI", "IPC controller unavailable; retrying in background");
     }
 
+    if (state.map_restore_open) {
+        state.overlay_mode = OverlayMode::minimap;
+        suppress_separate_coordinates_for_map(state);
+    }
     build_overlay(state, options.width, options.height);
 
     auto last_tick = std::chrono::steady_clock::now();
@@ -2892,17 +3574,47 @@ int main(int argc, char** argv)
             poll_linux_keyboard(keyboard_input, state, now);
         }
         poll_ipc(state, now);
+        record_flight_position(state);
+#if OPENHD_GLIDE_HAS_LVGL_SDL && defined(_WIN32)
+        if (options.preview && sdl_menu_toggle_requested.exchange(false, std::memory_order_acq_rel)) {
+            auto* group = lv_group_get_default();
+            auto* focused = group != nullptr ? lv_group_get_focused(group) : nullptr;
+            const auto editing_text = focused != nullptr && lv_obj_check_type(focused, &lv_textarea_class)
+                && group != nullptr && lv_group_get_editing(group);
+            if (!editing_text) {
+                dispatch_key(state, "m");
+            }
+        }
+#endif
+#if OPENHD_GLIDE_HAS_LVGL_SDL
+        if (options.preview && state.overlay_mode == OverlayMode::minimap && state.minimap) {
+            const int zoom_steps = sdl_map_zoom_steps.exchange(0, std::memory_order_acq_rel);
+            if (zoom_steps != 0) {
+                state.minimap->set_zoom(state.minimap->zoom() + (zoom_steps > 0 ? 0.25 : -0.25));
+                if (!state.buffer_composition) state.minimap->render();
+                send_gpu_map_state(state);
+            }
+        } else {
+            sdl_map_zoom_steps.store(0, std::memory_order_release);
+        }
+#endif
         if (options.buffer && state.overlay_mode == OverlayMode::hidden) {
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
             continue;
         }
         update_minimap(state, now);
         lv_timer_handler();
+#if OPENHD_GLIDE_HAS_LVGL_SDL
+        if (options.preview) {
+            sync_sdl_window_visibility(state.overlay_mode != OverlayMode::hidden);
+        }
+#endif
         std::this_thread::sleep_for(ui_frame_interval);
     }
 
 #if OPENHD_GLIDE_HAS_LVGL_SDL
     if (options.preview) {
+        SDL_DelEventWatch(global_sdl_key_watch, nullptr);
         lv_sdl_quit();
     }
 #endif

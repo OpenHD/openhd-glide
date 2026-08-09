@@ -23,6 +23,7 @@
 
 #include "glide_flow/gles_text_renderer.hpp"
 
+#include "common/logging.hpp"
 #include "glide_flow/vector_font.hpp"
 
 #include <array>
@@ -30,10 +31,12 @@
 #include <cmath>
 #include <cctype>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #if OPENHD_GLIDE_HAS_GLESV2
 #include <GLES2/gl2.h>
@@ -46,6 +49,122 @@
 
 namespace glide::flow {
 namespace {
+
+#if OPENHD_GLIDE_HAS_FREETYPE
+std::string environment_value(const char* name)
+{
+#if defined(_WIN32)
+    char* value {};
+    std::size_t size {};
+    if (_dupenv_s(&value, &size, name) != 0 || value == nullptr) return {};
+    const std::string result(value);
+    std::free(value);
+    return result;
+#else
+    const auto* value = std::getenv(name);
+    return value != nullptr ? value : "";
+#endif
+}
+
+std::filesystem::path find_osd_font()
+{
+    std::vector<std::filesystem::path> candidates;
+    const auto override_path = environment_value("GLIDE_OSD_FONT");
+    if (!override_path.empty()) {
+        candidates.emplace_back(override_path);
+    }
+
+#if defined(_WIN32)
+    const auto configured_windows_dir = environment_value("WINDIR");
+    const auto windows_dir = std::filesystem::path(
+        configured_windows_dir.empty() ? "C:\\Windows" : configured_windows_dir);
+    candidates.emplace_back(windows_dir / "Fonts" / "seguisb.ttf");
+    candidates.emplace_back(windows_dir / "Fonts" / "segoeui.ttf");
+    candidates.emplace_back(windows_dir / "Fonts" / "arial.ttf");
+#else
+    candidates.emplace_back("/usr/share/openhd-glide/fonts/Montserrat-SemiBold.ttf");
+    candidates.emplace_back("/usr/share/fonts/noto/NotoSans-Medium.ttf");
+    candidates.emplace_back("/usr/share/fonts/noto/NotoSans-Regular.ttf");
+    candidates.emplace_back("/usr/share/fonts/opentype/noto/NotoSans-Regular.ttf");
+    candidates.emplace_back("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc");
+    candidates.emplace_back("/usr/share/fonts/truetype/noto/NotoSans-Medium.ttf");
+    candidates.emplace_back("/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf");
+    candidates.emplace_back("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf");
+    candidates.emplace_back("/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed.ttf");
+    candidates.emplace_back("/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf");
+    candidates.emplace_back("/usr/share/fonts/truetype/ubuntu/Ubuntu-R.ttf");
+    candidates.emplace_back("/usr/share/fonts/truetype/roboto/Roboto-Regular.ttf");
+#endif
+
+    std::error_code error;
+    for (const auto& path : candidates) {
+        if (std::filesystem::is_regular_file(path, error)) {
+            return path;
+        }
+        error.clear();
+    }
+
+    // Distribution font layouts differ considerably. As a final fallback,
+    // select a regular sans-serif face from the platform font directory.
+    std::vector<std::filesystem::path> roots;
+#if defined(_WIN32)
+    roots.emplace_back(windows_dir / "Fonts");
+    const auto local_app_data = environment_value("LOCALAPPDATA");
+    if (!local_app_data.empty()) {
+        roots.emplace_back(std::filesystem::path(local_app_data) / "Microsoft" / "Windows" / "Fonts");
+    }
+#else
+    roots.emplace_back("/usr/share/fonts");
+    roots.emplace_back("/usr/local/share/fonts");
+    const auto home_dir = environment_value("HOME");
+    if (!home_dir.empty()) {
+        roots.emplace_back(std::filesystem::path(home_dir) / ".local" / "share" / "fonts");
+    }
+#endif
+
+    std::filesystem::path best;
+    int best_score = 1000;
+    for (const auto& root : roots) {
+        if (!std::filesystem::is_directory(root, error)) {
+            error.clear();
+            continue;
+        }
+        std::filesystem::recursive_directory_iterator iterator(
+            root, std::filesystem::directory_options::skip_permission_denied, error);
+        const std::filesystem::recursive_directory_iterator end;
+        while (iterator != end) {
+            if (!error && iterator->is_regular_file(error)) {
+                auto name = iterator->path().filename().string();
+                std::transform(name.begin(), name.end(), name.begin(), [](unsigned char value) {
+                    return static_cast<char>(std::tolower(value));
+                });
+                const auto extension = iterator->path().extension().string();
+                if (extension == ".ttf" || extension == ".otf" || extension == ".ttc") {
+                    int score = 100;
+                    if (name.find("notosans") != std::string::npos) score = 10;
+                    else if (name.find("dejavusans") != std::string::npos) score = 20;
+                    else if (name.find("liberationsans") != std::string::npos) score = 30;
+                    else if (name.find("roboto") != std::string::npos) score = 40;
+                    else if (name.find("ubuntu") != std::string::npos) score = 50;
+                    else if (name.find("segoeui") != std::string::npos) score = 60;
+                    else if (name.find("arial") != std::string::npos) score = 70;
+                    if (name.find("bold") != std::string::npos || name.find("italic") != std::string::npos
+                        || name.find("emoji") != std::string::npos || name.find("symbol") != std::string::npos) {
+                        score += 20;
+                    }
+                    if (score < best_score) {
+                        best = iterator->path();
+                        best_score = score;
+                    }
+                }
+            }
+            error.clear();
+            iterator.increment(error);
+        }
+    }
+    return best;
+}
+#endif
 
 #if OPENHD_GLIDE_HAS_GLESV2
 constexpr auto vertex_shader_source = R"glsl(
@@ -95,12 +214,13 @@ void main()
 constexpr auto argb_fragment_shader_source = R"glsl(
 precision mediump float;
 uniform sampler2D u_texture;
+uniform bool u_swap_red_blue;
 varying vec2 v_texcoord;
 
 void main()
 {
-    vec4 bgra = texture2D(u_texture, v_texcoord);
-    gl_FragColor = vec4(bgra.b, bgra.g, bgra.r, bgra.a);
+    vec4 pixel = texture2D(u_texture, v_texcoord);
+    gl_FragColor = u_swap_red_blue ? vec4(pixel.b, pixel.g, pixel.r, pixel.a) : pixel;
 }
 )glsl";
 
@@ -141,6 +261,7 @@ void draw_quad(GLint position_location, const std::array<GLfloat, 8>& vertices)
         vertices.data());
     glEnableVertexAttribArray(static_cast<GLuint>(position_location));
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    glDisableVertexAttribArray(static_cast<GLuint>(position_location));
 }
 
 void draw_textured_quad(
@@ -165,6 +286,8 @@ void draw_textured_quad(
         vertices.data() + 2);
     glEnableVertexAttribArray(static_cast<GLuint>(texcoord_location));
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    glDisableVertexAttribArray(static_cast<GLuint>(texcoord_location));
+    glDisableVertexAttribArray(static_cast<GLuint>(position_location));
 }
 
 void draw_stroke_quad(
@@ -355,31 +478,19 @@ bool GlesTextRenderer::ensure_text_initialized()
         return false;
     }
 
-    const std::array font_paths {
-        // Orange OS and several embedded distributions install Noto directly
-        // below /usr/share/fonts instead of the Debian truetype hierarchy.
-        // Prefer the medium face for legible OSD text over moving video.
-        "/usr/share/fonts/noto/NotoSans-Medium.ttf",
-        "/usr/share/fonts/noto/NotoSans-Regular.ttf",
-        "/usr/share/fonts/truetype/noto/NotoSans-Medium.ttf",
-        "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed.ttf",
-        "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
-    };
-
     FT_Face face {};
-    for (const auto* path : font_paths) {
-        if (std::filesystem::exists(path) && FT_New_Face(library, path, 0, &face) == 0) {
-            break;
-        }
+    const auto font_path = find_osd_font();
+    if (!font_path.empty()) {
+        FT_New_Face(library, font_path.string().c_str(), 0, &face);
     }
 
     if (face == nullptr) {
         FT_Done_FreeType(library);
         last_error_ = "failed to load a TrueType font for OSD text";
+        glide::log(glide::LogLevel::warning, "GlideFlow", last_error_ + "; using vector fallback");
         return false;
     }
+    glide::log(glide::LogLevel::info, "GlideFlow", "FreeType OSD font: " + font_path.string());
 
     const GLuint vertex_shader = compile_shader(GL_VERTEX_SHADER, text_vertex_shader_source);
     const GLuint fragment_shader = compile_shader(GL_FRAGMENT_SHADER, text_fragment_shader_source);
@@ -480,10 +591,12 @@ bool GlesTextRenderer::ensure_image_initialized()
     image_position_location_ = glGetAttribLocation(image_program_, "a_position");
     image_texcoord_location_ = glGetAttribLocation(image_program_, "a_texcoord");
     image_sampler_location_ = glGetUniformLocation(image_program_, "u_texture");
+    image_swap_red_blue_location_ = glGetUniformLocation(image_program_, "u_swap_red_blue");
     image_texture_ = texture;
     return image_position_location_ >= 0
         && image_texcoord_location_ >= 0
-        && image_sampler_location_ >= 0;
+        && image_sampler_location_ >= 0
+        && image_swap_red_blue_location_ >= 0;
 #else
     last_error_ = "OpenGL ES 2.0 was not found at build time";
     return false;
@@ -735,6 +848,7 @@ bool GlesTextRenderer::update_argb_texture(const void* pixels, std::uint32_t wid
             pixels);
     }
     image_texture_ready_ = true;
+    image_swap_red_blue_ = true;
     return true;
 #else
     (void)pixels;
@@ -744,6 +858,15 @@ bool GlesTextRenderer::update_argb_texture(const void* pixels, std::uint32_t wid
     last_error_ = "OpenGL ES 2.0 was not found at build time";
     return false;
 #endif
+}
+
+bool GlesTextRenderer::update_rgba_texture(const void* pixels, std::uint32_t width, std::uint32_t height, std::uint32_t stride_bytes)
+{
+    if (!update_argb_texture(pixels, width, height, stride_bytes)) {
+        return false;
+    }
+    image_swap_red_blue_ = false;
+    return true;
 }
 
 void GlesTextRenderer::draw_cached_argb_texture(RenderPoint top_left, SurfaceSize surface)
@@ -756,6 +879,19 @@ void GlesTextRenderer::draw_cached_argb_texture(RenderPoint top_left, SurfaceSiz
 }
 
 void GlesTextRenderer::draw_cached_argb_texture_scaled(RenderPoint top_left, float width, float height, SurfaceSize surface)
+{
+    draw_cached_argb_texture_region(top_left, width, height, 0.0F, 0.0F, 1.0F, 1.0F, surface);
+}
+
+void GlesTextRenderer::draw_cached_argb_texture_region(
+    RenderPoint top_left,
+    float width,
+    float height,
+    float u0,
+    float v0,
+    float u1,
+    float v1,
+    SurfaceSize surface)
 {
 #if OPENHD_GLIDE_HAS_GLESV2
     if (!image_texture_ready_ || image_texture_width_ == 0 || image_texture_height_ == 0) {
@@ -772,6 +908,7 @@ void GlesTextRenderer::draw_cached_argb_texture_scaled(RenderPoint top_left, flo
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, image_texture_);
     glUniform1i(image_sampler_location_, 0);
+    glUniform1i(image_swap_red_blue_location_, image_swap_red_blue_ ? 1 : 0);
     const auto x = top_left.x;
     const auto y = top_left.y;
     const auto right = x + width;
@@ -779,26 +916,30 @@ void GlesTextRenderer::draw_cached_argb_texture_scaled(RenderPoint top_left, flo
     const std::array<GLfloat, 16> vertices {
         to_ndc_x(x, surface),
         to_ndc_y(y, surface),
-        0.0F,
-        0.0F,
+        u0,
+        v0,
         to_ndc_x(right, surface),
         to_ndc_y(y, surface),
-        1.0F,
-        0.0F,
+        u1,
+        v0,
         to_ndc_x(x, surface),
         to_ndc_y(bottom, surface),
-        0.0F,
-        1.0F,
+        u0,
+        v1,
         to_ndc_x(right, surface),
         to_ndc_y(bottom, surface),
-        1.0F,
-        1.0F,
+        u1,
+        v1,
     };
     draw_textured_quad(image_position_location_, image_texcoord_location_, vertices);
 #else
     (void)top_left;
     (void)width;
     (void)height;
+    (void)u0;
+    (void)v0;
+    (void)u1;
+    (void)v1;
     (void)surface;
     last_error_ = "OpenGL ES 2.0 was not found at build time";
 #endif

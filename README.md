@@ -35,9 +35,39 @@ It also computes the first worker CPU assignment plan: `glide-view` gets the str
 
 ## Build
 
+### Linux architecture packages
+
+The `final_ci.yml` workflow builds the same Linux architecture matrix as
+OpenHD: native AMD64 plus cross-compiled ARM64 and ARMHF Debian packages. The
+ARM builds consume the verified Bullseye sysroots published by OpenHD, using
+the shared `openhd-sysroot-bullseye-<architecture>.tar.zst` artifacts. Those
+sysroots are a superset for both projects and include OpenHD's Poco/networking
+dependencies as well as Glide's DRM, GBM, EGL, GLES, FreeType, zlib, and
+GStreamer development files. ARM64 adds Rockchip MPP development files during
+the Glide build; ARMHF uses the portable GStreamer decoder path.
+
+For a release, run OpenHD's `prepare_cross_sysroots.yml` first when the shared
+package list changes, then run Glide's `final_ci.yml`. The final cross packages
+are produced and validated in GitHub Actions; local builds are only for
+development reproduction.
+
+To reproduce either ARM package after extracting a shared sysroot:
+
+```sh
+./scripts/build_portable_cross.sh arm64 /path/to/sysroot-arm64
+./scripts/build_portable_cross.sh armhf /path/to/sysroot-armhf
+```
+
+The CMake toolchain also accepts OpenHD's canonical `OPENHD_SYSROOT` and
+`OPENHD_CROSS_TRIPLET` environment contract, so the same downloaded sysroot can
+configure both repositories. Packages are published for the same Debian,
+Raspbian, and Ubuntu channels used by OpenHD. Board-native Cedar packages and
+the Orqa SDK artifact remain separate because they require vendor runtimes not
+present in a portable Debian sysroot.
+
 ### Orqa cross-build
 
-The `crosscompile-orqa.yml` GitHub Actions workflow uses the Orqa Yocto SDK
+The Orqa job in `final_ci.yml` uses the Orqa Yocto SDK
 and produces a stripped AArch64 rootfs archive. The target profile is based on
 the live DTK-EVK at `192.168.7.145`: SDL2, native Rockchip MPP, and native
 Allwinner Cedar are disabled. H.264/H.265 video decoding uses the target's
@@ -456,7 +486,8 @@ Flow speed/altitude ladder versus compact text mode. Flow renders OSD elements a
 visibility and settings live in the UI menu and controller IPC. The custom wind indicator is rendered by Flow inside
 the performance horizon.
 The UI preview also owns the LVGL minimap layer. Press `M` to cycle menu -> minimap -> hidden, or press `N` to
-cycle minimap -> menu -> hidden. When the minimap is visible, `+` zooms in and `-` zooms out. The two views share one
+cycle minimap -> menu -> hidden. When the minimap is visible, right arrow/`>` zooms in and left arrow/`<` zooms out
+(`+`/`-` also work). The two views share one
 layer and are never displayed at the same time.
 The layout can be adjusted:
 
@@ -466,21 +497,74 @@ The layout can be adjusted:
 
 The default development IPC socket is `/tmp/openhd-glide.sock`; override it with `--ipc-socket <path>`.
 
+### Native Windows desktop preview
+
+Windows uses the same preview stack without DRM/KMS or device-specific decoders. GStreamer software-decodes the
+RTP stream into the GlideFlow SDL/GLES window; Flow then draws the OSD over that video in the same surface. The
+LVGL menu and map render into a shared buffer and GlideFlow composites them into that same window, matching the Linux
+layering model without opening a second UI window. Press `M` in the GlideFlow window to show or hide the menu and `N`
+to show or hide the map. Controller IPC uses loopback TCP
+(`127.0.0.1:32145`) on Windows. GlideFlow uses FreeType with the Windows UI font; set `GLIDE_OSD_FONT` to override it.
+The primary and secondary OpenHD RTP streams listen on UDP ports `5600` and `5601`. Glide starts on OpenHD camera 1
+(`5600`); press `Space` in the GlideFlow window to switch to camera 2 (`5601`) and back. Both inputs are the streams forwarded by the OpenHD ground unit; Glide does not connect
+directly to an air-side camera. The desktop pipeline uses software decoding, a 50 ms RTP reorder
+buffer, keyframe recovery, and VSync. Encoded frames are never discarded merely because rendering is temporarily
+behind; only already-decoded display frames may be replaced.
+The `Status` panel uses QOpenHD's manual connection behavior: enter the ground-unit IP and use `CONNECT TCP`.
+TCP port `5760` is fixed and the last IP is saved in the user's configuration directory. Once configured, GlideUI
+automatically retries that TCP endpoint when OpenHD goes offline and reconnects when it becomes available again. The
+same controller transport is used on Windows and Linux; the normal passive UDP listener on port 14550 remains the
+startup default.
+
+Install Visual Studio 2022 with the C++ workload, CMake, Git, vcpkg, and both the 64-bit MSVC runtime and development
+packages from GStreamer. Set `VCPKG_ROOT`, then build and run:
+
+```powershell
+$env:VCPKG_ROOT = "C:\src\vcpkg"
+./examples/build-run-windows.ps1 -Codec h264 -Port 5600
+
+```
+
+The script uses the `windows-desktop` CMake preset and the repository's `vcpkg.json` for SDL2, ANGLE, FreeType, and
+zlib. It looks for GStreamer at `C:\gstreamer\1.0\msvc_x86_64`; set
+`GSTREAMER_1_0_ROOT_MSVC_X86_64` if it is installed elsewhere. Use `-BuildOnly` to compile without launching.
+After compiling, the helper copies all required runtime DLLs, the required GStreamer plugins, and
+`gst-plugin-scanner.exe` beside the executables in `build-windows\Release`. The resulting folder therefore starts
+from Explorer or a clean terminal without depending on GStreamer's or vcpkg's DLL directories being in `PATH`.
+Once built, the equivalent direct command is:
+
+```powershell
+./build-windows/Release/openhd-glide.exe --preview-stack --view-udp-codec h264 --view-udp-port 5600
+```
+
+Send RTP/H.264 to `127.0.0.1:5600` with the existing Windows sender example. H.265 and MJPEG are selected with
+`-Codec h265` or `-Codec mjpeg`. The desktop pipeline deliberately uses FFmpeg/GStreamer software decoders and does
+not initialize DRM, KMS, Cedar, Rockchip MPP, or i.MX VPU support.
+
 ### LVGL minimap demo
 
 `glide-minimap-demo` is a standalone LVGL/SDL preview for the reusable minimap widget in
-`src/glide_ui/minimap_widget.*`. It is intentionally offline-only: it reads local raster PNG tiles from
-`assets/maps/{z}/{x}/{y}.png`, uses Web Mercator tile math, caches decoded tiles, and draws a small 3x3 or 5x5
-tile grid with the aircraft kept centered. The demo simulates aircraft motion and heading, and renders the home
-marker, route trail, aircraft icon, and border into a raster LVGL canvas. The map is heading-up: the card aligns to
-the current flight direction while the outer compass ring shows N/S/E/W and heading ticks.
-If a requested local tile is missing, the widget creates a deterministic free offline test tile at that path before
-rendering it, so `glide-minimap-demo --preview` works from a clean directory without paid APIs or tile downloads.
+`src/glide_ui/minimap_widget.*`. It is intentionally offline-only: it reads indexed `.glidemap` packages and retains
+`assets/maps/{z}/{x}/{y}.png` as a development fallback. It uses Web Mercator tile math and caches decoded tiles. The compact rectangular card
+uses a near-black road-map style with an orange route/home overlay, a heading arrow, zoom level, and metric scale.
+Missing tiles stay graphitfarben and are never silently replaced with synthetic terrain or downloaded at runtime.
 
-Generate the tiny fake local tile set and run it on WSL/Linux:
+The installed image includes `Revival Ranch Belgium 10 km` (center `50.3192371, 6.3570094`, zoom 12-15) as a
+ready-to-use test area. Glide scans its bundled package directory plus
+`$XDG_DATA_HOME/openhd-glide/maps` (normally `~/.local/share/openhd-glide/maps`) and automatically selects the
+smallest/highest-resolution package containing the current GPS position. The WebUI can therefore install or remove
+complete regions by copying a single `.glidemap` file; Glide itself never needs internet access.
+
+In the integrated buffer/KMS stack the map surface is rendered by `glide-flow` with OpenGL ES. Glide decodes only
+newly visible PNG tiles, assembles a small texture atlas, and uploads that atlas when the integer zoom or covered tile
+range changes. Fractional zooming, GPS movement, the trail, home marker, and aircraft marker are then rendered on the
+GPU. LVGL retains the frame, labels, input, and scale display but does not rasterize the large map surface. The
+standalone `glide-minimap-demo` intentionally retains its CPU canvas as a portable development fallback.
+
+Generate a dark local road map from OpenStreetMap vector geometry and run it on WSL/Linux:
 
 ```sh
-python3 scripts/generate_fake_minimap_tiles.py --root assets/maps --zoom 15
+python3 scripts/generate_offline_osm_tiles.py --root assets/maps --zoom 15 --lat 51.2373245 --lon 7.1616353 --radius 2
 cmake -S . -B build-wsl
 cmake --build build-wsl --target glide-minimap-demo -j"$(nproc)"
 ./build-wsl/glide-minimap-demo --preview --width 420 --height 420 --tile-root assets/maps --zoom 15
@@ -498,8 +582,8 @@ The helper script does the same build and tile generation steps:
 examples/run-wsl-minimap-preview.sh
 ```
 
-`examples/run-wsl-ui-preview.sh` starts that full preview stack by default, generates the fake minimap tiles, and
-exports `GLIDE_MINIMAP_TILE_ROOT`, so the integrated UI preview can show the round minimap with `M` or `N`
+`examples/run-wsl-ui-preview.sh` starts that full preview stack by default and exports `GLIDE_MINIMAP_TILE_ROOT`,
+so the integrated UI preview can show the rectangular minimap with `M` or `N`
 immediately. Use `GLIDE_UI_ONLY=1 examples/run-wsl-ui-preview.sh` for the old standalone UI window. Use `+` and `-`
 to zoom the map.
 
@@ -509,14 +593,23 @@ To install the WSL build into `~/.local`:
 cmake -S . -B build-wsl -DCMAKE_INSTALL_PREFIX="$HOME/.local"
 cmake --build build-wsl --target glide-ui glide-minimap-demo -j"$(nproc)"
 cmake --install build-wsl
-python3 "$HOME/.local/share/openhd-glide/scripts/generate_fake_minimap_tiles.py" --root "$HOME/.local/share/openhd-glide/assets/maps" --zoom 15
+python3 "$HOME/.local/share/openhd-glide/scripts/generate_offline_osm_tiles.py" --root "$HOME/.local/share/openhd-glide/assets/maps" --zoom 15 --lat 51.2373245 --lon 7.1616353 --radius 2
 GLIDE_MINIMAP_TILE_ROOT="$HOME/.local/share/openhd-glide/assets/maps" "$HOME/.local/bin/glide-ui" --preview --width 760 --height 720
 ```
 
-No paid map APIs are used. The fake generator creates only a small deterministic terrain tile fixture around the demo
-home position: elevation shading, forest patches, lowlands/water, and contour/ridge lines. Real deployments should
-place their own offline terrain tiles under the same `assets/maps/{z}/{x}/{y}.png` layout. Missing real tiles are
-replaced by generated offline terrain test tiles, never fetched from the network.
+No paid map API or raster-tile service is used. The generator downloads OpenStreetMap road geometry once from an
+Overpass endpoint and renders the selected area locally into dark XYZ PNG tiles. Generate each zoom level that should
+be available offline; the runtime itself performs no network requests.
+
+To produce the same kind of single-file region the WebUI will manage:
+
+```sh
+python3 scripts/generate_offline_osm_tiles.py --root build/map-tiles \
+  --lat 50.3192371 --lon 6.3570094 --radius-km 10 --min-zoom 12 --max-zoom 15 \
+  --name "Revival Ranch Belgium 10 km" --package revival-ranch-belgium-10km.glidemap
+```
+
+Set `GLIDE_MAP_PACKAGE_DIR` when a platform or WebUI uses a different package directory.
 
 Terminal and MAVLink-state IPC helpers:
 
@@ -543,6 +636,25 @@ MAVLink flight data (`HEARTBEAT`, `ATTITUDE`, `GPS_RAW_INT`, `GLOBAL_POSITION_IN
 plus custom OpenHD message IDs as status lines), then broadcasts normalized `mav ...` state to Flow and UI. Menu
 actions are translated back into MAVLink `PARAM_EXT_SET`, numeric `PARAM_SET`, or command-long packets when a peer has
 been seen on the UDP socket.
+
+### GPS movement emulator
+
+The dependency-free emulator sends a moving MAVLink flight controller to the default UDP bridge and is useful for
+testing the minimap, trail, heading, speed, and altitude without an aircraft. Its default route starts at the TMDT
+building in Wuppertal (51.2373245, 7.1616353):
+
+```powershell
+.\examples\run-gps-emulator.ps1
+```
+
+Choose a location and route shape with, for example:
+
+```powershell
+.\examples\run-gps-emulator.ps1 -Latitude 48.1372 -Longitude 11.5756 -Pattern circle -Speed 18 -Radius 250
+```
+
+The underlying Python sender also supports `--host`, `--port`, `--altitude`, `--rate`, and `--duration`. Stop a
+continuous simulation with `Ctrl+C`.
 
 UI navigation is directional: `up/down` moves through the sidebar or focused setting rows, `right` enters the settings
 panel, `left` returns to the sidebar or collapses it, and `enter` activates the focused row.

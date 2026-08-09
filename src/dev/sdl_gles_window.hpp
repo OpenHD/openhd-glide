@@ -55,6 +55,7 @@ public:
     bool create(const char* title, WindowPlacement placement);
     bool poll();
     bool consume_click(int& x, int& y);
+    bool consume_key(std::string& key);
     void swap();
     flow::SurfaceSize surface_size() const;
     const std::string& last_error() const;
@@ -66,6 +67,7 @@ private:
     int click_x_ {};
     int click_y_ {};
     bool has_click_ {};
+    std::string key_;
     std::string last_error_;
 };
 

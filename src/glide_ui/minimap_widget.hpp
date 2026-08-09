@@ -41,8 +41,9 @@ struct MinimapOptions {
     int zoom { 15 };
     int tile_size { 256 };
     int grid_tiles { 5 };
-    std::uint32_t background_rgb { 0x111821 };
+    std::uint32_t background_rgb { 0x090e0f };
     bool round { true };
+    bool render_on_interaction { true };
 };
 
 class MinimapWidget {
@@ -56,9 +57,15 @@ public:
     lv_obj_t* object() const { return canvas_; }
     void set_home(double latitude_deg, double longitude_deg);
     void set_position(const MinimapPosition& position);
-    void set_zoom(int zoom);
-    int zoom() const;
+    void set_zoom(double zoom);
+    double zoom() const;
+    void pan_by_pixels(int delta_x, int delta_y);
+    void recenter();
+    double pan_x() const;
+    double pan_y() const;
     void render();
+    double home_distance_m() const;
+    double meters_per_pixel() const;
 
 private:
     struct Impl;

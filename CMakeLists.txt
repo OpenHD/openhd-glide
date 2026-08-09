@@ -58,6 +58,14 @@ option(OPENHD_GLIDE_ENABLE_CEDAR "Enable native Allwinner Cedar decoding when av
 option(OPENHD_GLIDE_ENABLE_RKMPP "Enable native Rockchip MPP decoding when available" ON)
 option(OPENHD_GLIDE_ENABLE_IMXVPU "Enable native NXP i.MX VPU API 2 decoding when available" ON)
 option(OPENHD_GLIDE_INSTALL_SYSTEMD "Install the OpenHD-Glide systemd autostart unit on Linux" ON)
+
+if(WIN32)
+    set(OPENHD_GLIDE_DEVICE_KMS OFF CACHE BOOL "DRM/KMS is unavailable on Windows" FORCE)
+    set(OPENHD_GLIDE_ENABLE_CEDAR OFF CACHE BOOL "Cedar is unavailable on Windows" FORCE)
+    set(OPENHD_GLIDE_ENABLE_RKMPP OFF CACHE BOOL "Rockchip MPP is unavailable on Windows" FORCE)
+    set(OPENHD_GLIDE_ENABLE_IMXVPU OFF CACHE BOOL "i.MX VPU is unavailable on Windows" FORCE)
+    set(OPENHD_GLIDE_INSTALL_SYSTEMD OFF CACHE BOOL "systemd is unavailable on Windows" FORCE)
+endif()
 set(OPENHD_GLIDE_PACKAGE_SUFFIX "" CACHE STRING "Optional suffix for the Debian package name")
 set(OPENHD_GLIDE_PACKAGE_VERSION "${PROJECT_VERSION}" CACHE STRING "Debian package version")
 set(OPENHD_GLIDE_PACKAGE_ARCHITECTURE "" CACHE STRING "Debian package architecture")
@@ -72,6 +80,7 @@ add_library(glide_common
     src/common/mavlink_udp_bridge.cpp
     src/common/network_discovery.cpp
     src/common/preview_control.cpp
+    src/glide_ui/offline_map_package.cpp
     src/platform/core_assignment.cpp
     src/platform/cpu_topology.cpp
     src/platform/drm_probe.cpp
@@ -82,6 +91,10 @@ target_include_directories(glide_common
     PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
+
+if(WIN32)
+    target_link_libraries(glide_common PUBLIC ws2_32)
+endif()
 
 if(MSVC)
     target_compile_options(glide_common PRIVATE /W4)
@@ -103,7 +116,7 @@ if(PkgConfig_FOUND)
     pkg_check_modules(GBM QUIET gbm)
     pkg_check_modules(EGL QUIET egl)
     pkg_check_modules(GLESV2 QUIET glesv2)
-    if(OPENHD_GLIDE_ENABLE_SDL2)
+    if(OPENHD_GLIDE_ENABLE_SDL2 AND NOT WIN32)
         pkg_check_modules(SDL2 QUIET sdl2)
     endif()
     pkg_check_modules(FREETYPE QUIET freetype2)
@@ -120,6 +133,45 @@ if(PkgConfig_FOUND)
     endif()
 endif()
 
+# Native Windows builds normally obtain SDL2, ANGLE and FreeType through
+# vcpkg. Keep pkg-config above for the official GStreamer SDK.
+if(WIN32)
+    if(OPENHD_GLIDE_ENABLE_SDL2)
+        find_package(SDL2 CONFIG REQUIRED)
+        if(TARGET SDL2::SDL2)
+            set(SDL2_FOUND TRUE)
+            set(SDL2_LIBRARIES SDL2::SDL2)
+            set(SDL2_INCLUDE_DIRS "")
+            set(SDL2_LIBRARY_DIRS "")
+        endif()
+    endif()
+    if(NOT GLESV2_FOUND)
+        find_package(unofficial-angle CONFIG QUIET)
+        if(TARGET unofficial::angle::libGLESv2)
+            set(GLESV2_FOUND TRUE)
+            # SDL creates the Windows GLES context through EGL.  Link both
+            # ANGLE runtime targets so vcpkg deploys libEGL.dll beside every
+            # preview executable as well as libGLESv2.dll.
+            set(GLESV2_LIBRARIES
+                unofficial::angle::libGLESv2
+                unofficial::angle::libEGL)
+            if(DEFINED VCPKG_INSTALLED_DIR AND DEFINED VCPKG_TARGET_TRIPLET)
+                set(GLESV2_INCLUDE_DIRS "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/include/angle")
+            endif()
+        endif()
+    endif()
+    if(NOT FREETYPE_FOUND)
+        find_package(Freetype QUIET)
+        if(TARGET Freetype::Freetype)
+            set(FREETYPE_FOUND TRUE)
+            set(FREETYPE_LIBRARIES Freetype::Freetype)
+        endif()
+    endif()
+    if(NOT SDL2_FOUND OR NOT GLESV2_FOUND)
+        message(FATAL_ERROR "Windows desktop builds require SDL2 and ANGLE (install the vcpkg manifest dependencies)")
+    endif()
+endif()
+
 if(GBM_FOUND)
     set(CMAKE_REQUIRED_INCLUDES ${GBM_INCLUDE_DIRS})
     set(CMAKE_REQUIRED_LIBRARIES ${GBM_LIBRARIES})
@@ -130,9 +182,14 @@ endif()
 
 option(OPENHD_GLIDE_PREFER_SYSTEM_MESA "Prefer distro GBM/EGL/GLES libraries over /usr/local Mesa on device builds" ON)
 if(OPENHD_GLIDE_PREFER_SYSTEM_MESA AND UNIX AND NOT APPLE)
-    find_library(OPENHD_GLIDE_SYSTEM_GBM NAMES gbm PATHS /usr/lib/aarch64-linux-gnu NO_DEFAULT_PATH)
-    find_library(OPENHD_GLIDE_SYSTEM_EGL NAMES EGL PATHS /usr/lib/aarch64-linux-gnu NO_DEFAULT_PATH)
-    find_library(OPENHD_GLIDE_SYSTEM_GLESV2 NAMES GLESv2 PATHS /usr/lib/aarch64-linux-gnu NO_DEFAULT_PATH)
+    if(CMAKE_LIBRARY_ARCHITECTURE)
+        set(OPENHD_GLIDE_SYSTEM_LIBRARY_DIR "/usr/lib/${CMAKE_LIBRARY_ARCHITECTURE}")
+    else()
+        set(OPENHD_GLIDE_SYSTEM_LIBRARY_DIR "/usr/lib")
+    endif()
+    find_library(OPENHD_GLIDE_SYSTEM_GBM NAMES gbm PATHS "${OPENHD_GLIDE_SYSTEM_LIBRARY_DIR}" NO_DEFAULT_PATH)
+    find_library(OPENHD_GLIDE_SYSTEM_EGL NAMES EGL PATHS "${OPENHD_GLIDE_SYSTEM_LIBRARY_DIR}" NO_DEFAULT_PATH)
+    find_library(OPENHD_GLIDE_SYSTEM_GLESV2 NAMES GLESv2 PATHS "${OPENHD_GLIDE_SYSTEM_LIBRARY_DIR}" NO_DEFAULT_PATH)
     if(OPENHD_GLIDE_SYSTEM_GBM AND OPENHD_GLIDE_SYSTEM_EGL AND OPENHD_GLIDE_SYSTEM_GLESV2)
         set(GBM_LIBRARIES "${OPENHD_GLIDE_SYSTEM_GBM}")
         set(EGL_LIBRARIES "${OPENHD_GLIDE_SYSTEM_EGL}")
@@ -140,8 +197,8 @@ if(OPENHD_GLIDE_PREFER_SYSTEM_MESA AND UNIX AND NOT APPLE)
         set(GBM_LIBRARY_DIRS "")
         set(EGL_LIBRARY_DIRS "")
         set(GLESV2_LIBRARY_DIRS "")
-        set(CMAKE_BUILD_RPATH "/usr/lib/aarch64-linux-gnu")
-        set(CMAKE_INSTALL_RPATH "/usr/lib/aarch64-linux-gnu")
+        set(CMAKE_BUILD_RPATH "${OPENHD_GLIDE_SYSTEM_LIBRARY_DIR}")
+        set(CMAKE_INSTALL_RPATH "${OPENHD_GLIDE_SYSTEM_LIBRARY_DIR}")
     endif()
 endif()
 
@@ -168,8 +225,18 @@ FetchContent_Declare(
     GIT_SHALLOW TRUE
 )
 FetchContent_MakeAvailable(lvgl)
+if(MSVC AND NOT BUILD_SHARED_LIBS)
+    # LVGL 9.2 marks global data as dllimport even when its target is static,
+    # which leaves fonts unresolved in consumers. Keep the static interface
+    # free of that DLL-only definition.
+    get_target_property(LVGL_INTERFACE_DEFINITIONS lvgl INTERFACE_COMPILE_DEFINITIONS)
+    if(LVGL_INTERFACE_DEFINITIONS)
+        list(FILTER LVGL_INTERFACE_DEFINITIONS EXCLUDE REGEX "LV_ATTRIBUTE_EXTERN_DATA")
+        set_property(TARGET lvgl PROPERTY INTERFACE_COMPILE_DEFINITIONS "${LVGL_INTERFACE_DEFINITIONS}")
+    endif()
+endif()
 if(SDL2_FOUND)
-    target_compile_definitions(lvgl PRIVATE OPENHD_GLIDE_HAS_LVGL_SDL=1)
+    target_compile_definitions(lvgl PRIVATE OPENHD_GLIDE_HAS_LVGL_SDL=1 SDL_MAIN_HANDLED=1)
     target_include_directories(lvgl SYSTEM PRIVATE ${SDL2_INCLUDE_DIRS})
     target_link_libraries(lvgl PRIVATE ${SDL2_LIBRARIES})
     target_link_directories(lvgl PRIVATE ${SDL2_LIBRARY_DIRS})
@@ -192,6 +259,7 @@ function(add_glide_executable target_name source_file)
 endfunction()
 
 add_library(glide_dev
+    src/dev/desktop_video_pipeline.cpp
     src/dev/dmabuf_gles_video_renderer.cpp
     src/dev/kms_atomic_compositor.cpp
     src/dev/kms_dmabuf_video_plane.cpp
@@ -202,12 +270,23 @@ add_library(glide_dev
 target_link_libraries(glide_dev PUBLIC glide_common)
 
 if(SDL2_FOUND)
-    target_compile_definitions(glide_dev PUBLIC OPENHD_GLIDE_HAS_SDL2=1)
+    target_compile_definitions(glide_dev PUBLIC OPENHD_GLIDE_HAS_SDL2=1 SDL_MAIN_HANDLED=1)
     target_include_directories(glide_dev PRIVATE ${SDL2_INCLUDE_DIRS})
     target_link_libraries(glide_dev PRIVATE ${SDL2_LIBRARIES})
     target_link_directories(glide_dev PRIVATE ${SDL2_LIBRARY_DIRS})
 else()
     target_compile_definitions(glide_dev PUBLIC OPENHD_GLIDE_HAS_SDL2=0)
+endif()
+
+if(GSTREAMER_FOUND)
+    target_compile_definitions(glide_dev PUBLIC OPENHD_GLIDE_HAS_GSTREAMER=1)
+    target_include_directories(glide_dev PRIVATE ${GSTREAMER_INCLUDE_DIRS})
+    target_link_libraries(glide_dev PRIVATE ${GSTREAMER_LIBRARIES})
+    # glide_dev is static, so consumers must inherit the search path for the
+    # GStreamer libraries referenced by desktop_video_pipeline.cpp.
+    target_link_directories(glide_dev PUBLIC ${GSTREAMER_LIBRARY_DIRS})
+else()
+    target_compile_definitions(glide_dev PUBLIC OPENHD_GLIDE_HAS_GSTREAMER=0)
 endif()
 
 if(GLESV2_FOUND)
@@ -266,6 +345,7 @@ add_library(glide_flow_core
     src/glide_flow/fps_counter.cpp
     src/glide_flow/fps_overlay.cpp
     src/glide_flow/gles_text_renderer.cpp
+    src/glide_flow/gpu_map_renderer.cpp
     src/glide_flow/link_overview.cpp
     src/glide_flow/naval_osd.cpp
     src/glide_flow/performance_horizon.cpp
@@ -276,7 +356,7 @@ add_library(glide_flow_core
     src/glide_flow/vector_font.cpp
 )
 
-target_link_libraries(glide_flow_core PUBLIC glide_common glide_dev)
+target_link_libraries(glide_flow_core PUBLIC glide_common glide_dev ZLIB::ZLIB)
 
 if(MSVC)
     target_compile_options(glide_flow_core PRIVATE /W4)
@@ -404,7 +484,7 @@ else()
     target_compile_definitions(glide-ui PRIVATE OPENHD_GLIDE_DEVICE_KMS=0)
 endif()
 if(SDL2_FOUND)
-    target_compile_definitions(glide-ui PRIVATE OPENHD_GLIDE_HAS_LVGL_SDL=1)
+    target_compile_definitions(glide-ui PRIVATE OPENHD_GLIDE_HAS_LVGL_SDL=1 SDL_MAIN_HANDLED=1)
     target_include_directories(glide-ui PRIVATE ${SDL2_INCLUDE_DIRS})
     target_link_libraries(glide-ui PRIVATE lvgl ${SDL2_LIBRARIES})
     target_link_directories(glide-ui PRIVATE ${SDL2_LIBRARY_DIRS})
@@ -423,7 +503,7 @@ target_link_libraries(glide-ui PRIVATE glide_minimap)
 add_executable(glide-minimap-demo src/glide_ui/minimap_demo.cpp)
 target_link_libraries(glide-minimap-demo PRIVATE glide_minimap)
 if(SDL2_FOUND)
-    target_compile_definitions(glide-minimap-demo PRIVATE OPENHD_GLIDE_HAS_LVGL_SDL=1)
+    target_compile_definitions(glide-minimap-demo PRIVATE OPENHD_GLIDE_HAS_LVGL_SDL=1 SDL_MAIN_HANDLED=1)
     target_include_directories(glide-minimap-demo PRIVATE ${SDL2_INCLUDE_DIRS})
     target_link_libraries(glide-minimap-demo PRIVATE lvgl ${SDL2_LIBRARIES})
     target_link_directories(glide-minimap-demo PRIVATE ${SDL2_LIBRARY_DIRS})
@@ -433,6 +513,15 @@ endif()
 
 add_executable(glide-flow src/glide_flow/main.cpp)
 target_link_libraries(glide-flow PRIVATE glide_flow_core glide_dev)
+if(WIN32 AND TARGET unofficial::angle::libEGL)
+    # SDL loads ANGLE's EGL frontend dynamically when SDL_VIDEO_FORCE_EGL is
+    # enabled, so it does not appear in the executable import table and
+    # vcpkg's automatic DLL deployment cannot discover it.
+    add_custom_command(TARGET glide-flow POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_FILE:unofficial::angle::libEGL>
+            $<TARGET_FILE_DIR:glide-flow>)
+endif()
 if(OPENHD_GLIDE_DEVICE_KMS)
     target_compile_definitions(glide-flow PRIVATE OPENHD_GLIDE_DEVICE_KMS=1)
 else()
@@ -456,6 +545,7 @@ install(
     PROGRAMS
         scripts/build-auto.sh
         scripts/generate_fake_minimap_tiles.py
+        scripts/generate_offline_osm_tiles.py
         tools/artosyn_rtp_fixture.py
     DESTINATION share/openhd-glide/scripts
 )
@@ -464,6 +554,12 @@ install(
     FILES
         packaging/assets/x20_header.h264
     DESTINATION share/openhd-glide
+)
+
+install(
+    DIRECTORY assets/maps/packages/
+    DESTINATION share/openhd-glide/assets/maps/packages
+    FILES_MATCHING PATTERN "*.glidemap"
 )
 
 install(
@@ -492,6 +588,8 @@ install(
         examples/run-wsl-flow-preview.sh
         examples/run-wsl-ui-preview.sh
         examples/run-wsl-minimap-preview.sh
+        examples/gps-mavlink-emulator.py
+        examples/run-gps-emulator.ps1
         examples/run-wsl-video-decode.sh
         examples/capture-artosyn-rtp.sh
         examples/run-rkmpp-isolated-probe.sh
@@ -577,7 +675,7 @@ if(OPENHD_GLIDE_CROSS_PACKAGE)
 else()
     set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
 endif()
-set(OPENHD_GLIDE_DEBIAN_DEPENDS "libc6, libstdc++6, libdrm2, libgbm1, libegl1, libgles2, libfreetype6, zlib1g, libgstreamer1.0-0, libgstreamer-plugins-base1.0-0")
+set(OPENHD_GLIDE_DEBIAN_DEPENDS "libc6, libstdc++6, libdrm2, libgbm1, libegl1, libgles2, libfreetype6, fonts-dejavu-core, zlib1g, libgstreamer1.0-0, libgstreamer-plugins-base1.0-0")
 if(OPENHD_GLIDE_EXTRA_DEBIAN_DEPENDS)
     string(APPEND OPENHD_GLIDE_DEBIAN_DEPENDS ", ${OPENHD_GLIDE_EXTRA_DEBIAN_DEPENDS}")
 endif()

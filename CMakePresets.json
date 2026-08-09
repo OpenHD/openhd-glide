@@ -21,7 +21,27 @@
       "binaryDir": "${sourceDir}/build-kms",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "OPENHD_GLIDE_DEVICE_KMS": "ON"
+        "OPENHD_GLIDE_DEVICE_KMS": "ON",
+        "OPENHD_GLIDE_REQUIRE_FREETYPE": "ON"
+      }
+    },
+    {
+      "name": "windows-desktop",
+      "displayName": "Windows desktop preview",
+      "description": "Native Windows build using SDL2/ANGLE and software GStreamer decoding; no DRM or device decoders.",
+      "generator": "Visual Studio 17 2022",
+      "architecture": "x64",
+      "binaryDir": "${sourceDir}/build-windows",
+      "cacheVariables": {
+        "OPENHD_GLIDE_DEVICE_KMS": "OFF",
+        "OPENHD_GLIDE_ENABLE_CEDAR": "OFF",
+        "OPENHD_GLIDE_ENABLE_RKMPP": "OFF",
+        "OPENHD_GLIDE_ENABLE_IMXVPU": "OFF",
+        "OPENHD_GLIDE_ENABLE_SDL2": "ON",
+        "OPENHD_GLIDE_ENABLE_GSTREAMER": "ON",
+        "OPENHD_GLIDE_REQUIRE_GSTREAMER": "ON",
+        "OPENHD_GLIDE_REQUIRE_FREETYPE": "ON",
+        "OPENHD_GLIDE_INSTALL_SYSTEMD": "OFF"
       }
     }
   ],
@@ -29,6 +49,11 @@
     {
       "name": "device-kms",
       "configurePreset": "device-kms"
+    },
+    {
+      "name": "windows-desktop",
+      "configurePreset": "windows-desktop",
+      "configuration": "Release"
     }
   ]
 }

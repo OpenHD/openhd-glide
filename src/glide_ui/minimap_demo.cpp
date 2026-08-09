@@ -72,6 +72,8 @@ struct Options {
     std::string tile_root { "assets/maps" };
     int zoom { 15 };
     int grid_tiles { 5 };
+    double latitude { 38.8976763 };
+    double longitude { -77.0365298 };
 };
 
 struct DemoState {
@@ -105,6 +107,10 @@ Options parse_options(int argc, char** argv)
             options.zoom = std::stoi(argv[++i]);
         } else if (argument == "--grid" && i + 1 < argc) {
             options.grid_tiles = std::stoi(argv[++i]);
+        } else if (argument == "--lat" && i + 1 < argc) {
+            options.latitude = std::stod(argv[++i]);
+        } else if (argument == "--lon" && i + 1 < argc) {
+            options.longitude = std::stod(argv[++i]);
         }
     }
     return options;
@@ -193,7 +199,9 @@ void buffer_flush(lv_display_t* display, const lv_area_t* area, unsigned char* p
                 source + source_y * area_width + source_x,
                 copy_width * sizeof(std::uint32_t));
         }
+#if defined(__linux__)
         msync(target->map, target->size, MS_ASYNC);
+#endif
     }
     lv_display_flush_ready(display);
 }
@@ -204,7 +212,11 @@ void set_sdl_position(const Options& options)
         return;
     }
     const auto position = std::to_string(options.x) + "," + std::to_string(options.y);
+#if defined(_WIN32)
+    _putenv_s("SDL_VIDEO_WINDOW_POS", position.c_str());
+#else
     setenv("SDL_VIDEO_WINDOW_POS", position.c_str(), 1);
+#endif
 }
 
 lv_color_t color(std::uint32_t rgb)
@@ -231,10 +243,10 @@ void keyboard_event(lv_event_t* event)
     }
     const auto key = lv_event_get_key(event);
     if (key == '+' || key == '=') {
-        state->minimap->set_zoom(state->minimap->zoom() + 1);
+        state->minimap->set_zoom(state->minimap->zoom() + 0.25);
         state->minimap->render();
     } else if (key == '-' || key == '_') {
-        state->minimap->set_zoom(state->minimap->zoom() - 1);
+        state->minimap->set_zoom(state->minimap->zoom() - 0.25);
         state->minimap->render();
     }
 }
@@ -306,8 +318,8 @@ int main(int argc, char** argv)
     }
     lv_obj_center(minimap.object());
 
-    const double home_lat = 38.8976763;
-    const double home_lon = -77.0365298;
+    const double home_lat = options.latitude;
+    const double home_lon = options.longitude;
     minimap.set_home(home_lat, home_lon);
     minimap.set_position(glide::ui::MinimapPosition {
         .latitude_deg = home_lat,
@@ -331,8 +343,8 @@ int main(int argc, char** argv)
             const double seconds = std::chrono::duration<double>(now - started).count();
             const double progress = std::min(1.0, seconds / 240.0);
             const double eased = progress * progress * (3.0 - 2.0 * progress);
-            constexpr double city_lat = 38.8951100;
-            constexpr double city_lon = -77.0219570;
+            const double city_lat = home_lat + 0.0025;
+            const double city_lon = home_lon + 0.0145;
             glide::ui::MinimapPosition position {
                 .latitude_deg = home_lat + (city_lat - home_lat) * eased,
                 .longitude_deg = home_lon + (city_lon - home_lon) * eased,

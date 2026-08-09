@@ -25,10 +25,15 @@
 
 #include <string>
 #include <vector>
+#include <cstdint>
 
 namespace glide::ipc {
 
+#if defined(_WIN32)
+constexpr const char* default_socket_path = "127.0.0.1:32145";
+#else
 constexpr const char* default_socket_path = "/tmp/openhd-glide.sock";
+#endif
 
 class Client {
 public:
@@ -45,7 +50,7 @@ public:
     void close();
 
 private:
-    int fd_ { -1 };
+    std::intptr_t fd_ { -1 };
     std::string read_buffer_;
 };
 
@@ -72,11 +77,11 @@ public:
 private:
     struct ClientState {
         int id {};
-        int fd {};
+        std::intptr_t fd {};
         std::string read_buffer;
     };
 
-    int listen_fd_ { -1 };
+    std::intptr_t listen_fd_ { -1 };
     int next_client_id_ { 1 };
     std::string path_;
     std::string last_error_;

@@ -29,10 +29,17 @@
 
 namespace glide::mavlink {
 
+inline constexpr std::uint16_t openhd_ground_tcp_port = 5760;
+
 struct UdpBridgeOptions {
     std::uint16_t listen_port { 14550 };
     std::uint8_t system_id { 255 };
     std::uint8_t component_id { 190 };
+};
+
+enum class NetworkTransport {
+    udp,
+    tcp,
 };
 
 class UdpBridge {
@@ -44,10 +51,12 @@ public:
     UdpBridge& operator=(const UdpBridge&) = delete;
 
     bool start(UdpBridgeOptions options = {});
+    bool connect_to(NetworkTransport transport, const std::string& host, std::uint16_t port);
     std::vector<std::string> poll();
     bool handle_action_line(const std::string& line);
     void close();
     bool running() const;
+    std::string connection_description() const;
     const std::string& last_error() const;
 
 private:
@@ -56,8 +65,13 @@ private:
     bool send_command_long(const std::string& command, const std::string& arguments);
     bool send_packet(std::uint32_t message_id, std::uint8_t crc_extra, const std::vector<std::uint8_t>& payload);
 
-    int fd_ { -1 };
+    std::intptr_t fd_ { -1 };
     UdpBridgeOptions options_ {};
+    NetworkTransport transport_ { NetworkTransport::udp };
+    std::string remote_host_;
+    std::uint16_t remote_port_ {};
+    bool listening_ {};
+    std::vector<std::uint8_t> stream_buffer_;
     std::uint8_t sequence_ {};
     std::uint8_t flight_controller_system_id_ { 1 };
     std::uint8_t flight_controller_component_id_ { 1 };

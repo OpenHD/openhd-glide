@@ -22,6 +22,7 @@
  ******************************************************************************/
 
 #include "glide_ui/minimap_widget.hpp"
+#include "glide_ui/offline_map_package.hpp"
 
 #include "common/logging.hpp"
 
@@ -45,8 +46,8 @@ namespace {
 
 constexpr double kPi = 3.14159265358979323846;
 constexpr int kMaxCachedTiles = 25;
-constexpr double kFallbackLatitude = 38.8976763;
-constexpr double kFallbackLongitude = -77.0365298;
+constexpr double kFallbackLatitude = 51.2373245;
+constexpr double kFallbackLongitude = 7.1616353;
 
 std::uint32_t argb(std::uint8_t a, std::uint8_t r, std::uint8_t g, std::uint8_t b)
 {
@@ -438,6 +439,28 @@ void generate_gta_tile(int z, int tile_x, int tile_y, int size, std::vector<std:
             if (std::abs(std::fmod(elevation * 21.0, 1.0) - 0.5) < 0.018 && elevation > 0.32) {
                 color = mix_rgb(color, 0xb7d0b0, 0.22);
             }
+
+            // A restrained, high-contrast road hierarchy in the visual
+            // language of an in-game navigation map. World-pixel equations
+            // keep roads continuous across generated tile boundaries.
+            const auto periodic_distance = [](double value, double period) {
+                const double wrapped = std::fmod(std::abs(value), period);
+                return std::min(wrapped, period - wrapped);
+            };
+            const double major_vertical = periodic_distance(wx + std::sin(wy / 210.0) * 34.0, 420.0);
+            const double major_horizontal = periodic_distance(wy + std::sin(wx / 260.0) * 28.0, 360.0);
+            const double local_vertical = periodic_distance(wx + std::sin(wy / 95.0) * 12.0, 118.0);
+            const double local_horizontal = periodic_distance(wy + std::sin(wx / 110.0) * 10.0, 126.0);
+            const double major = std::min(major_vertical, major_horizontal);
+            const double local = std::min(local_vertical, local_horizontal);
+            if (major < 5.5) {
+                color = rgb(0x29302d);
+            }
+            if (major < 3.2) {
+                color = rgb(0xe4e1d5);
+            } else if (local < 1.35) {
+                color = rgb(0xb8b8ae);
+            }
             pixels[static_cast<std::size_t>(y) * static_cast<std::size_t>(size) + static_cast<std::size_t>(x)] = color;
         }
     }
@@ -495,19 +518,8 @@ std::uint8_t paeth(std::uint8_t a, std::uint8_t b, std::uint8_t c)
     return pb <= pc ? b : c;
 }
 
-bool decode_png(const std::filesystem::path& path, PngImage& image)
+bool decode_png_bytes(const std::vector<std::uint8_t>& bytes, PngImage& image)
 {
-    FILE* file = std::fopen(path.string().c_str(), "rb");
-    if (file == nullptr) {
-        return false;
-    }
-    std::vector<std::uint8_t> bytes;
-    std::array<std::uint8_t, 4096> chunk {};
-    while (const auto count = std::fread(chunk.data(), 1, chunk.size(), file)) {
-        bytes.insert(bytes.end(), chunk.begin(), chunk.begin() + static_cast<std::ptrdiff_t>(count));
-    }
-    std::fclose(file);
-
     static constexpr std::array<std::uint8_t, 8> signature { 137, 80, 78, 71, 13, 10, 26, 10 };
     if (bytes.size() < signature.size() || !std::equal(signature.begin(), signature.end(), bytes.begin())) {
         return false;
@@ -599,6 +611,19 @@ bool decode_png(const std::filesystem::path& path, PngImage& image)
     return true;
 }
 
+bool decode_png(const std::filesystem::path& path, PngImage& image)
+{
+    FILE* file = std::fopen(path.string().c_str(), "rb");
+    if (file == nullptr) return false;
+    std::vector<std::uint8_t> bytes;
+    std::array<std::uint8_t, 4096> chunk {};
+    while (const auto count = std::fread(chunk.data(), 1, chunk.size(), file)) {
+        bytes.insert(bytes.end(), chunk.begin(), chunk.begin() + static_cast<std::ptrdiff_t>(count));
+    }
+    std::fclose(file);
+    return decode_png_bytes(bytes, image);
+}
+
 } // namespace
 
 struct MinimapWidget::Impl {
@@ -614,6 +639,8 @@ struct MinimapWidget::Impl {
         home_longitude = kFallbackLongitude;
         has_home = true;
         pixels.resize(static_cast<std::size_t>(width) * static_cast<std::size_t>(height), rgb(options.background_rgb));
+        packages = discover_offline_map_packages(options.tile_root);
+        select_package(position.latitude_deg, position.longitude_deg);
     }
 
     struct Tile {
@@ -637,7 +664,31 @@ struct MinimapWidget::Impl {
     std::vector<MinimapPosition> trail;
     std::vector<std::uint32_t> pixels;
     std::map<std::string, Tile> cache;
+    std::vector<OfflineMapPackage> packages;
+    OfflineMapPackage* active_package {};
     std::uint64_t tick {};
+    double pan_x {};
+    double pan_y {};
+    double zoom_level { static_cast<double>(options.zoom) };
+
+    void select_package(double latitude, double longitude)
+    {
+        OfflineMapPackage* best = nullptr;
+        for (auto& package : packages) {
+            if (!package.contains(latitude, longitude)) continue;
+            if (best == nullptr || package.max_zoom() > best->max_zoom()
+                || (package.max_zoom() == best->max_zoom() && package.covered_area() < best->covered_area())) {
+                best = &package;
+            }
+        }
+        if (best != active_package) {
+            active_package = best;
+            cache.clear();
+            if (active_package != nullptr) {
+                glide::log(glide::LogLevel::info, "GlideMap", "selected offline package " + active_package->name());
+            }
+        }
+    }
 
     Tile* tile(int z, int x, int y)
     {
@@ -653,19 +704,26 @@ struct MinimapWidget::Impl {
             result.z = z;
             result.x = x;
             result.y = y;
-            const auto path = std::filesystem::path(options.tile_root) / std::to_string(z) / std::to_string(x) / (std::to_string(y) + ".png");
             PngImage image;
-            if (decode_png(path, image)) {
+            bool decoded = false;
+            if (active_package != nullptr) {
+                std::vector<std::uint8_t> bytes;
+                decoded = active_package->read_tile(z, x, y, bytes) && decode_png_bytes(bytes, image);
+            }
+            if (!decoded) {
+                const auto path = std::filesystem::path(options.tile_root) / std::to_string(z) / std::to_string(x) / (std::to_string(y) + ".png");
+                decoded = decode_png(path, image);
+            }
+            if (decoded) {
                 result.width = image.width;
                 result.height = image.height;
                 result.pixels = std::move(image.pixels);
             } else {
                 result.width = options.tile_size;
                 result.height = options.tile_size;
-                generate_gta_tile(z, x, y, result.width, result.pixels);
-                if (write_png(path, result.width, result.height, result.pixels)) {
-                    glide::log(glide::LogLevel::info, "GlideMinimap", "generated offline tile " + path.string());
-                }
+                result.pixels.assign(
+                    static_cast<std::size_t>(result.width) * static_cast<std::size_t>(result.height),
+                    rgb(options.background_rgb));
             }
             result.loaded = true;
             prune_cache();
@@ -673,11 +731,21 @@ struct MinimapWidget::Impl {
         return &result;
     }
 
-    std::uint32_t sample_world(double world_x, double world_y)
+    bool has_tile_at(int zoom, double latitude, double longitude) const
+    {
+        const auto world = web_mercator_pixel(latitude, longitude, zoom, options.tile_size);
+        const int tile_x = static_cast<int>(std::floor(world.x / static_cast<double>(options.tile_size)));
+        const int tile_y = static_cast<int>(std::floor(world.y / static_cast<double>(options.tile_size)));
+        if (active_package != nullptr && active_package->has_tile(zoom, tile_x, tile_y)) return true;
+        const auto path = std::filesystem::path(options.tile_root) / std::to_string(zoom) / std::to_string(tile_x) / (std::to_string(tile_y) + ".png");
+        return std::filesystem::is_regular_file(path);
+    }
+
+    std::uint32_t sample_world_nearest(int zoom, double world_x, double world_y)
     {
         const int tile_x = static_cast<int>(std::floor(world_x / static_cast<double>(options.tile_size)));
         const int tile_y = static_cast<int>(std::floor(world_y / static_cast<double>(options.tile_size)));
-        auto* source = tile(options.zoom, tile_x, tile_y);
+        auto* source = tile(zoom, tile_x, tile_y);
         if (source == nullptr || source->pixels.empty()) {
             return rgb(options.background_rgb);
         }
@@ -686,6 +754,28 @@ struct MinimapWidget::Impl {
         pixel_x = std::clamp(pixel_x, 0, source->width - 1);
         pixel_y = std::clamp(pixel_y, 0, source->height - 1);
         return source->pixels[static_cast<std::size_t>(pixel_y) * static_cast<std::size_t>(source->width) + static_cast<std::size_t>(pixel_x)];
+    }
+
+    std::uint32_t sample_world(int zoom, double world_x, double world_y)
+    {
+        const double x0 = std::floor(world_x);
+        const double y0 = std::floor(world_y);
+        const double tx = world_x - x0;
+        const double ty = world_y - y0;
+        const auto p00 = sample_world_nearest(zoom, x0, y0);
+        const auto p10 = sample_world_nearest(zoom, x0 + 1.0, y0);
+        const auto p01 = sample_world_nearest(zoom, x0, y0 + 1.0);
+        const auto p11 = sample_world_nearest(zoom, x0 + 1.0, y0 + 1.0);
+        const auto channel = [&](unsigned shift) {
+            const double top = static_cast<double>((p00 >> shift) & 0xffU) * (1.0 - tx)
+                + static_cast<double>((p10 >> shift) & 0xffU) * tx;
+            const double bottom = static_cast<double>((p01 >> shift) & 0xffU) * (1.0 - tx)
+                + static_cast<double>((p11 >> shift) & 0xffU) * tx;
+            return static_cast<std::uint8_t>(std::clamp(std::lround(top * (1.0 - ty) + bottom * ty), 0L, 255L));
+        };
+        return rgb((static_cast<std::uint32_t>(channel(16)) << 16U)
+            | (static_cast<std::uint32_t>(channel(8)) << 8U)
+            | static_cast<std::uint32_t>(channel(0)));
     }
 
     void prune_cache()
@@ -708,8 +798,31 @@ MinimapWidget::MinimapWidget(lv_obj_t* parent, int width, int height, MinimapOpt
     canvas_ = lv_canvas_create(parent);
     lv_obj_set_size(canvas_, width, height);
     lv_canvas_set_buffer(canvas_, impl_->pixels.data(), width, height, LV_COLOR_FORMAT_ARGB8888);
-    lv_obj_set_style_radius(canvas_, 8, 0);
+    lv_obj_set_style_radius(canvas_, 16, 0);
     lv_obj_set_style_clip_corner(canvas_, true, 0);
+    lv_obj_add_flag(canvas_, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(canvas_, LV_OBJ_FLAG_CLICK_FOCUSABLE);
+    lv_obj_remove_flag(canvas_, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(
+        canvas_,
+        [](lv_event_t* event) {
+            auto* self = static_cast<MinimapWidget*>(lv_event_get_user_data(event));
+            auto* indev = lv_indev_active();
+            if (self == nullptr) return;
+            if (lv_event_get_code(event) == LV_EVENT_PRESSING && indev != nullptr) {
+                lv_point_t movement {};
+                lv_indev_get_vect(indev, &movement);
+                if (movement.x != 0 || movement.y != 0) {
+                    self->pan_by_pixels(movement.x, movement.y);
+                    if (self->impl_->options.render_on_interaction) self->render();
+                }
+            } else if (lv_event_get_code(event) == LV_EVENT_LONG_PRESSED) {
+                self->recenter();
+                if (self->impl_->options.render_on_interaction) self->render();
+            }
+        },
+        LV_EVENT_ALL,
+        this);
     lv_obj_invalidate(canvas_);
 }
 
@@ -728,39 +841,53 @@ void MinimapWidget::set_home(double latitude_deg, double longitude_deg)
 void MinimapWidget::set_position(const MinimapPosition& position)
 {
     impl_->position = position;
+    impl_->select_package(position.latitude_deg, position.longitude_deg);
     if (impl_->trail.empty()) {
         impl_->trail.push_back(position);
         return;
     }
     const auto last = impl_->trail.back();
-    const auto dx = web_mercator_pixel(position.latitude_deg, position.longitude_deg, impl_->options.zoom, impl_->options.tile_size).x
-        - web_mercator_pixel(last.latitude_deg, last.longitude_deg, impl_->options.zoom, impl_->options.tile_size).x;
-    const auto dy = web_mercator_pixel(position.latitude_deg, position.longitude_deg, impl_->options.zoom, impl_->options.tile_size).y
-        - web_mercator_pixel(last.latitude_deg, last.longitude_deg, impl_->options.zoom, impl_->options.tile_size).y;
-    if (std::hypot(dx, dy) >= 2.0) {
+    const int trail_zoom = std::clamp(static_cast<int>(std::floor(impl_->zoom_level)), 12, 18);
+    const auto dx = web_mercator_pixel(position.latitude_deg, position.longitude_deg, trail_zoom, impl_->options.tile_size).x
+        - web_mercator_pixel(last.latitude_deg, last.longitude_deg, trail_zoom, impl_->options.tile_size).x;
+    const auto dy = web_mercator_pixel(position.latitude_deg, position.longitude_deg, trail_zoom, impl_->options.tile_size).y
+        - web_mercator_pixel(last.latitude_deg, last.longitude_deg, trail_zoom, impl_->options.tile_size).y;
+    if (std::hypot(dx, dy) >= 0.5) {
         impl_->trail.push_back(position);
-        if (impl_->trail.size() > 80) {
-            impl_->trail.erase(impl_->trail.begin(), impl_->trail.begin() + static_cast<std::ptrdiff_t>(impl_->trail.size() - 80));
+        if (impl_->trail.size() > 2000) {
+            impl_->trail.erase(impl_->trail.begin(), impl_->trail.begin() + 500);
         }
     }
 }
 
-void MinimapWidget::set_zoom(int zoom)
+void MinimapWidget::set_zoom(double zoom)
 {
-    zoom = std::clamp(zoom, 12, 18);
-    if (impl_->options.zoom == zoom) {
+    zoom = std::clamp(zoom, 13.0, 18.0);
+    if (std::abs(impl_->zoom_level - zoom) < 0.001) {
         return;
     }
-    impl_->options.zoom = zoom;
-    impl_->cache.clear();
-    impl_->trail.clear();
-    impl_->trail.push_back(impl_->position);
+    impl_->zoom_level = zoom;
 }
 
-int MinimapWidget::zoom() const
+double MinimapWidget::zoom() const
 {
-    return impl_->options.zoom;
+    return impl_->zoom_level;
 }
+
+void MinimapWidget::pan_by_pixels(int delta_x, int delta_y)
+{
+    impl_->pan_x += static_cast<double>(delta_x);
+    impl_->pan_y += static_cast<double>(delta_y);
+}
+
+void MinimapWidget::recenter()
+{
+    impl_->pan_x = 0.0;
+    impl_->pan_y = 0.0;
+}
+
+double MinimapWidget::pan_x() const { return impl_->pan_x; }
+double MinimapWidget::pan_y() const { return impl_->pan_y; }
 
 void MinimapWidget::render()
 {
@@ -770,8 +897,18 @@ void MinimapWidget::render()
     const int cy = state.height / 2;
     const int round_radius = std::min(state.width, state.height) / 2 - 2;
 
-    const auto center_world = web_mercator_pixel(state.position.latitude_deg, state.position.longitude_deg, state.options.zoom, state.options.tile_size);
-    const float heading_rad = state.position.heading_deg * static_cast<float>(kPi / 180.0);
+    int tile_zoom = std::clamp(static_cast<int>(std::floor(state.zoom_level)), 13, 18);
+    while (tile_zoom > 13 && !state.has_tile_at(tile_zoom, state.position.latitude_deg, state.position.longitude_deg)) {
+        --tile_zoom;
+    }
+    const double zoom_scale = std::pow(2.0, state.zoom_level - static_cast<double>(tile_zoom));
+    const auto aircraft_world = web_mercator_pixel(state.position.latitude_deg, state.position.longitude_deg, tile_zoom, state.options.tile_size);
+    const WorldPixel center_world {
+        aircraft_world.x - (state.options.round ? 0.0 : state.pan_x / zoom_scale),
+        aircraft_world.y - (state.options.round ? 0.0 : state.pan_y / zoom_scale),
+    };
+    const float map_heading_deg = state.options.round ? state.position.heading_deg : 0.0F;
+    const float heading_rad = map_heading_deg * static_cast<float>(kPi / 180.0);
     const double cos_heading = std::cos(heading_rad);
     const double sin_heading = std::sin(heading_rad);
     const int map_radius = state.options.round ? round_radius - 12 : std::max(state.width, state.height);
@@ -787,23 +924,24 @@ void MinimapWidget::render()
 
             const double world_dx = screen_dx * cos_heading - screen_dy * sin_heading;
             const double world_dy = screen_dx * sin_heading + screen_dy * cos_heading;
-            auto sample = state.sample_world(center_world.x + world_dx, center_world.y + world_dy);
+            auto sample = state.sample_world(tile_zoom, center_world.x + world_dx / zoom_scale, center_world.y + world_dy / zoom_scale);
             const auto r = (sample >> 16U) & 0xffU;
             const auto g = (sample >> 8U) & 0xffU;
             const auto b = sample & 0xffU;
+            const auto luminance = (r * 54U + g * 183U + b * 19U) / 256U;
             sample = argb(
                 0xff,
-                static_cast<std::uint8_t>(std::min(255U, (r * 78U) / 100U + 4U)),
-                static_cast<std::uint8_t>(std::min(255U, (g * 112U) / 100U + 10U)),
-                static_cast<std::uint8_t>(std::min(255U, (b * 120U) / 100U + 12U)));
+                static_cast<std::uint8_t>(8U + (luminance * 38U) / 100U),
+                static_cast<std::uint8_t>(13U + (luminance * 42U) / 100U),
+                static_cast<std::uint8_t>(14U + (luminance * 43U) / 100U));
             state.pixels[static_cast<std::size_t>(y) * static_cast<std::size_t>(state.width) + static_cast<std::size_t>(x)] = sample;
         }
     }
 
     auto to_screen = [&](double latitude, double longitude) {
-        const auto world = web_mercator_pixel(latitude, longitude, state.options.zoom, state.options.tile_size);
-        const double world_dx = world.x - center_world.x;
-        const double world_dy = world.y - center_world.y;
+        const auto world = web_mercator_pixel(latitude, longitude, tile_zoom, state.options.tile_size);
+        const double world_dx = (world.x - center_world.x) * zoom_scale;
+        const double world_dy = (world.y - center_world.y) * zoom_scale;
         return std::pair<int, int> {
             static_cast<int>(std::lround(static_cast<double>(state.width) / 2.0 + world_dx * cos_heading + world_dy * sin_heading)),
             static_cast<int>(std::lround(static_cast<double>(state.height) / 2.0 - world_dx * sin_heading + world_dy * cos_heading)),
@@ -813,13 +951,37 @@ void MinimapWidget::render()
     for (std::size_t i = 1; i < state.trail.size(); ++i) {
         const auto [x0, y0] = to_screen(state.trail[i - 1].latitude_deg, state.trail[i - 1].longitude_deg);
         const auto [x1, y1] = to_screen(state.trail[i].latitude_deg, state.trail[i].longitude_deg);
-        draw_line(state.pixels, state.width, state.height, x0, y0, x1, y1, argb(0xff, 0xff, 0x8a, 0x00));
+        draw_line_width(state.pixels, state.width, state.height, x0, y0, x1, y1, 5, argb(0xd8, 0x08, 0x0d, 0x0e));
+        const double length = std::hypot(static_cast<double>(x1 - x0), static_cast<double>(y1 - y0));
+        if (length > 0.0) {
+            for (double start = 0.0; start < length; start += 10.0) {
+                const double end = std::min(length, start + 5.0);
+                const double a = start / length;
+                const double b = end / length;
+                draw_line_width(
+                    state.pixels,
+                    state.width,
+                    state.height,
+                    static_cast<int>(std::lround(x0 + (x1 - x0) * a)),
+                    static_cast<int>(std::lround(y0 + (y1 - y0) * a)),
+                    static_cast<int>(std::lround(x0 + (x1 - x0) * b)),
+                    static_cast<int>(std::lround(y0 + (y1 - y0) * b)),
+                    3,
+                    argb(0xff, 0xe9, 0x58, 0x27));
+            }
+        }
     }
 
     if (state.has_home) {
         const auto [home_x, home_y] = to_screen(state.home_latitude, state.home_longitude);
-        draw_circle(state.pixels, state.width, state.height, home_x, home_y, 7, argb(0xff, 0x20, 0xb3, 0x83));
-        draw_circle(state.pixels, state.width, state.height, home_x, home_y, 3, argb(0xff, 0x05, 0x11, 0x16));
+        fill_rect(state.pixels, state.width, state.height, home_x - 5, home_y - 2, 10, 9, argb(0xff, 0xe9, 0x58, 0x27));
+        fill_triangle(
+            state.pixels,
+            state.width,
+            state.height,
+            { { { home_x - 7, home_y - 2 }, { home_x, home_y - 9 }, { home_x + 7, home_y - 2 } } },
+            argb(0xff, 0xe9, 0x58, 0x27));
+        fill_rect(state.pixels, state.width, state.height, home_x - 1, home_y + 2, 3, 5, argb(0xff, 0x09, 0x0e, 0x0f));
     }
 
     if (state.options.round) {
@@ -865,17 +1027,46 @@ void MinimapWidget::render()
         draw_line_width(state.pixels, state.width, state.height, cx + 10, cy - round_radius + 22, cx, cy - round_radius + 10, 3, argb(0xff, 0x75, 0xd5, 0xdf));
     }
 
-    draw_circle(state.pixels, state.width, state.height, cx, cy, 18, argb(0xff, 0x05, 0x11, 0x16));
-    draw_rotated_triangle(state.pixels, state.width, state.height, cx, cy, 0.0F, argb(0xff, 0xf7, 0xff, 0xf8));
+    const auto [aircraft_x, aircraft_y] = to_screen(state.position.latitude_deg, state.position.longitude_deg);
+    draw_circle(state.pixels, state.width, state.height, aircraft_x, aircraft_y, 18, argb(0xff, 0x05, 0x11, 0x16));
+    draw_rotated_triangle(
+        state.pixels,
+        state.width,
+        state.height,
+        aircraft_x,
+        aircraft_y,
+        state.options.round ? 0.0F : state.position.heading_deg,
+        argb(0xff, 0xf7, 0xff, 0xf8));
 
     if (!state.options.round) {
-        fill_rect(state.pixels, state.width, state.height, 0, 0, state.width, 2, argb(0xff, 0xff, 0x8a, 0x00));
-        fill_rect(state.pixels, state.width, state.height, 0, state.height - 2, state.width, 2, argb(0xff, 0xff, 0x8a, 0x00));
-        fill_rect(state.pixels, state.width, state.height, 0, 0, 2, state.height, argb(0xff, 0xff, 0x8a, 0x00));
-        fill_rect(state.pixels, state.width, state.height, state.width - 2, 0, 2, state.height, argb(0xff, 0xff, 0x8a, 0x00));
+        fill_rect(state.pixels, state.width, state.height, 0, 0, state.width, 2, argb(0xff, 0xb8, 0x43, 0x25));
+        fill_rect(state.pixels, state.width, state.height, 0, state.height - 2, state.width, 2, argb(0xff, 0xb8, 0x43, 0x25));
+        fill_rect(state.pixels, state.width, state.height, 0, 0, 2, state.height, argb(0xff, 0xb8, 0x43, 0x25));
+        fill_rect(state.pixels, state.width, state.height, state.width - 2, 0, 2, state.height, argb(0xff, 0xb8, 0x43, 0x25));
     }
 
     lv_obj_invalidate(canvas_);
+}
+
+double MinimapWidget::home_distance_m() const
+{
+    if (!impl_->has_home) return 0.0;
+    constexpr double earth_radius_m = 6371000.0;
+    const double lat1 = impl_->position.latitude_deg * kPi / 180.0;
+    const double lat2 = impl_->home_latitude * kPi / 180.0;
+    const double dlat = lat2 - lat1;
+    const double dlon = (impl_->home_longitude - impl_->position.longitude_deg) * kPi / 180.0;
+    const double a = std::sin(dlat * 0.5) * std::sin(dlat * 0.5)
+        + std::cos(lat1) * std::cos(lat2) * std::sin(dlon * 0.5) * std::sin(dlon * 0.5);
+    return earth_radius_m * 2.0 * std::atan2(std::sqrt(a), std::sqrt(std::max(0.0, 1.0 - a)));
+}
+
+double MinimapWidget::meters_per_pixel() const
+{
+    constexpr double earth_circumference_m = 40075016.686;
+    const double latitude = impl_->position.latitude_deg * kPi / 180.0;
+    return std::cos(latitude) * earth_circumference_m
+        / (static_cast<double>(impl_->options.tile_size) * std::pow(2.0, impl_->zoom_level));
 }
 
 } // namespace glide::ui

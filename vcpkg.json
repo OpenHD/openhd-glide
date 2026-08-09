@@ -1,0 +1,10 @@
+{
+  "name": "openhd-glide",
+  "version-string": "0.1.0",
+  "dependencies": [
+    "angle",
+    "freetype",
+    "sdl2",
+    "zlib"
+  ]
+}

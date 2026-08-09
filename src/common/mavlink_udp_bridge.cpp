@@ -28,14 +28,23 @@
 #include <array>
 #include <cerrno>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <iomanip>
+#include <limits>
 #include <optional>
 #include <sstream>
 
-#if defined(__linux__)
+#if defined(_WIN32)
+#define NOMINMAX
+#define WIN32_LEAN_AND_MEAN
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#pragma comment(lib, "ws2_32.lib")
+#elif defined(__linux__)
 #include <arpa/inet.h>
 #include <fcntl.h>
+#include <netdb.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -43,6 +52,85 @@
 
 namespace glide::mavlink {
 namespace {
+
+#if defined(_WIN32)
+using NativeSocket = SOCKET;
+constexpr NativeSocket invalid_socket = INVALID_SOCKET;
+bool ensure_socket_runtime()
+{
+    static const bool initialized = [] {
+        WSADATA data {};
+        return WSAStartup(MAKEWORD(2, 2), &data) == 0;
+    }();
+    return initialized;
+}
+int socket_error() { return WSAGetLastError(); }
+bool would_block(int error) { return error == WSAEWOULDBLOCK; }
+void close_native_socket(NativeSocket socket) { closesocket(socket); }
+bool set_nonblocking(NativeSocket socket)
+{
+    u_long enabled = 1;
+    return ioctlsocket(socket, FIONBIO, &enabled) == 0;
+}
+#elif defined(__linux__)
+using NativeSocket = int;
+constexpr NativeSocket invalid_socket = -1;
+bool ensure_socket_runtime() { return true; }
+int socket_error() { return errno; }
+bool would_block(int error) { return error == EAGAIN || error == EWOULDBLOCK; }
+void close_native_socket(NativeSocket socket) { ::close(socket); }
+bool set_nonblocking(NativeSocket socket)
+{
+    const auto flags = fcntl(socket, F_GETFL, 0);
+    return flags >= 0 && fcntl(socket, F_SETFL, flags | O_NONBLOCK) == 0;
+}
+#endif
+
+bool connect_with_timeout(NativeSocket socket, const sockaddr* address, int address_length, int& error)
+{
+    if (!set_nonblocking(socket)) {
+        error = socket_error();
+        return false;
+    }
+    if (::connect(socket, address, address_length) == 0) return true;
+    error = socket_error();
+#if defined(_WIN32)
+    if (error != WSAEWOULDBLOCK && error != WSAEINPROGRESS) return false;
+#else
+    if (error != EINPROGRESS && !would_block(error)) return false;
+#endif
+    fd_set writable;
+    fd_set failed;
+    FD_ZERO(&writable);
+    FD_ZERO(&failed);
+    FD_SET(socket, &writable);
+    FD_SET(socket, &failed);
+    timeval timeout { 1, 0 };
+    const auto selected = select(static_cast<int>(socket) + 1, nullptr, &writable, &failed, &timeout);
+    if (selected <= 0) {
+#if defined(_WIN32)
+        error = selected == 0 ? WSAETIMEDOUT : socket_error();
+#else
+        error = selected == 0 ? ETIMEDOUT : socket_error();
+#endif
+        return false;
+    }
+    int connect_error {};
+#if defined(_WIN32)
+    int option_length = sizeof(connect_error);
+#else
+    socklen_t option_length = sizeof(connect_error);
+#endif
+    if (getsockopt(socket, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&connect_error), &option_length) != 0 || connect_error != 0) {
+        error = connect_error != 0 ? connect_error : socket_error();
+        return false;
+    }
+    error = 0;
+    return true;
+}
+
+NativeSocket native_socket(std::intptr_t value) { return static_cast<NativeSocket>(value); }
+std::intptr_t stored_socket(NativeSocket value) { return static_cast<std::intptr_t>(value); }
 
 struct Frame {
     std::uint8_t sysid {};
@@ -175,7 +263,10 @@ std::optional<std::string> decode_frame(const Frame& frame)
         const auto lon = read_le<std::int32_t>(p, 12);
         const auto alt = read_le<std::int32_t>(p, 16);
         const auto satellites = read_le<std::uint8_t>(p, 29);
-        line << "mav position " << (static_cast<double>(lat) / 10000000.0) << ' ' << (static_cast<double>(lon) / 10000000.0) << ' ' << (static_cast<float>(alt) / 1000.0F);
+        line << "mav position " << std::setprecision(7)
+             << (static_cast<double>(lat) / 10000000.0) << ' '
+             << (static_cast<double>(lon) / 10000000.0) << ' '
+             << std::setprecision(2) << (static_cast<float>(alt) / 1000.0F);
         return line.str() + "\nmav gps " + std::to_string(static_cast<int>(satellites));
     }
     case 30: {
@@ -187,7 +278,10 @@ std::optional<std::string> decode_frame(const Frame& frame)
         const auto lat = read_le<std::int32_t>(p, 4);
         const auto lon = read_le<std::int32_t>(p, 8);
         const auto relative_alt = read_le<std::int32_t>(p, 16);
-        line << "mav position " << (static_cast<double>(lat) / 10000000.0) << ' ' << (static_cast<double>(lon) / 10000000.0) << ' ' << (static_cast<float>(relative_alt) / 1000.0F);
+        line << "mav position " << std::setprecision(7)
+             << (static_cast<double>(lat) / 10000000.0) << ' '
+             << (static_cast<double>(lon) / 10000000.0) << ' '
+             << std::setprecision(2) << (static_cast<float>(relative_alt) / 1000.0F);
         return line.str();
     }
     case 65: {
@@ -210,10 +304,23 @@ std::optional<std::string> decode_frame(const Frame& frame)
         break;
     }
     case 322: {
-        const auto name = c_string(p, 5, 16);
-        const auto value = c_string(p, 21, 128);
+        const auto name = c_string(p, 4, 16);
+        const auto type = read_le<std::uint8_t>(p, 148);
         if (!name.empty()) {
-            line << "mav param auto " << name << ' ' << value;
+            line << "mav param auto " << name << ' ';
+            switch (type) {
+            case 1: line << static_cast<unsigned int>(read_le<std::uint8_t>(p, 20)); break;
+            case 2: line << static_cast<int>(read_le<std::int8_t>(p, 20)); break;
+            case 3: line << read_le<std::uint16_t>(p, 20); break;
+            case 4: line << read_le<std::int16_t>(p, 20); break;
+            case 5: line << read_le<std::uint32_t>(p, 20); break;
+            case 6: line << read_le<std::int32_t>(p, 20); break;
+            case 7: line << read_le<std::uint64_t>(p, 20); break;
+            case 8: line << read_le<std::int64_t>(p, 20); break;
+            case 9: line << read_le<float>(p, 20); break;
+            case 10: line << read_le<double>(p, 20); break;
+            default: line << c_string(p, 20, 128); break;
+            }
             return line.str();
         }
         break;
@@ -298,34 +405,72 @@ std::vector<Frame> parse_datagram(const std::uint8_t* data, std::size_t size)
     return frames;
 }
 
+std::vector<Frame> parse_stream(std::vector<std::uint8_t>& bytes)
+{
+    std::vector<Frame> frames;
+    std::size_t consumed {};
+    for (std::size_t i = 0; i < bytes.size();) {
+        if (bytes[i] != 0xfe && bytes[i] != 0xfd) {
+            ++i;
+            consumed = i;
+            continue;
+        }
+        const bool mavlink2 = bytes[i] == 0xfd;
+        const auto header_len = mavlink2 ? 10U : 6U;
+        if (i + header_len + 2U > bytes.size()) break;
+        const auto payload_len = bytes[i + 1U];
+        const auto signature_len = mavlink2 && (bytes[i + 2U] & 0x01U) != 0 ? 13U : 0U;
+        const auto frame_len = header_len + payload_len + 2U + signature_len;
+        if (i + frame_len > bytes.size()) break;
+        auto parsed = parse_datagram(bytes.data() + i, frame_len);
+        if (!parsed.empty()) frames.push_back(std::move(parsed.front()));
+        i += frame_len;
+        consumed = i;
+    }
+    if (consumed != 0) bytes.erase(bytes.begin(), bytes.begin() + static_cast<std::ptrdiff_t>(consumed));
+    return frames;
+}
+
 std::uint8_t target_system_for(const std::string& target, std::uint8_t air, std::uint8_t ground, std::uint8_t fc)
 {
     if (target == "ground") {
-        return ground;
+        return openhd::system_id_ground;
     }
     if (target == "fc") {
         return fc;
     }
-    return air;
+    if (target == "air" || target == "camera1" || target == "camera2") {
+        return openhd::system_id_air;
+    }
+    return air != 0 ? air : (ground != 0 ? ground : openhd::system_id_air);
 }
 
 std::uint8_t target_component_for(const std::string& target, std::uint8_t air, std::uint8_t ground, std::uint8_t fc)
 {
+    if (target == "camera1") {
+        return openhd::component_id_camera_primary;
+    }
+    if (target == "camera2") {
+        return openhd::component_id_camera_secondary;
+    }
     if (target == "ground") {
-        return ground;
+        return openhd::component_id_link;
     }
     if (target == "fc") {
         return fc;
     }
-    return air;
+    if (target == "air") {
+        return openhd::component_id_link;
+    }
+    return air != 0 ? air : (ground != 0 ? ground : openhd::component_id_link);
 }
 
 } // namespace
 
 struct UdpBridge::PeerStorage {
-#if defined(__linux__)
+#if defined(_WIN32) || defined(__linux__)
     sockaddr_storage address {};
-    socklen_t length {};
+    int length {};
 #endif
     bool valid {};
 };
@@ -337,28 +482,35 @@ UdpBridge::~UdpBridge()
 
 bool UdpBridge::start(UdpBridgeOptions options)
 {
-#if defined(__linux__)
+#if defined(_WIN32) || defined(__linux__)
     close();
-    options_ = options;
-    fd_ = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
-    if (fd_ < 0) {
-        last_error_ = std::strerror(errno);
+    if (!ensure_socket_runtime()) {
+        last_error_ = "failed to initialize socket runtime";
         return false;
     }
+    options_ = options;
+    transport_ = NetworkTransport::udp;
+    listening_ = true;
+    const auto socket = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (socket == invalid_socket) {
+        last_error_ = "UDP socket error " + std::to_string(socket_error());
+        return false;
+    }
+    fd_ = stored_socket(socket);
     const int reuse = 1;
-    setsockopt(fd_, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+    setsockopt(socket, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&reuse), sizeof(reuse));
     sockaddr_in address {};
     address.sin_family = AF_INET;
     address.sin_addr.s_addr = htonl(INADDR_ANY);
     address.sin_port = htons(options.listen_port);
-    if (bind(fd_, reinterpret_cast<const sockaddr*>(&address), sizeof(address)) != 0) {
-        last_error_ = std::strerror(errno);
+    if (bind(socket, reinterpret_cast<const sockaddr*>(&address), sizeof(address)) != 0) {
+        last_error_ = "UDP bind error " + std::to_string(socket_error());
         close();
         return false;
     }
-    const auto flags = fcntl(fd_, F_GETFL, 0);
-    fcntl(fd_, F_SETFL, flags | O_NONBLOCK);
+    set_nonblocking(socket);
     peer_ = new PeerStorage {};
+    last_error_.clear();
     return true;
 #else
     (void)options;
@@ -367,27 +519,126 @@ bool UdpBridge::start(UdpBridgeOptions options)
 #endif
 }
 
+bool UdpBridge::connect_to(NetworkTransport transport, const std::string& host, std::uint16_t port)
+{
+#if defined(_WIN32) || defined(__linux__)
+    close();
+    if (!ensure_socket_runtime() || host.empty() || port == 0) {
+        last_error_ = "invalid telemetry endpoint";
+        return false;
+    }
+
+    addrinfo hints {};
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = transport == NetworkTransport::tcp ? SOCK_STREAM : SOCK_DGRAM;
+    hints.ai_protocol = transport == NetworkTransport::tcp ? IPPROTO_TCP : IPPROTO_UDP;
+    addrinfo* resolved {};
+    const auto port_text = std::to_string(port);
+    if (getaddrinfo(host.c_str(), port_text.c_str(), &hints, &resolved) != 0 || resolved == nullptr) {
+        last_error_ = "could not resolve telemetry host " + host;
+        return false;
+    }
+
+    NativeSocket connected = invalid_socket;
+    int last_connect_error = 0;
+    auto* selected = resolved;
+    for (; selected != nullptr; selected = selected->ai_next) {
+        connected = ::socket(selected->ai_family, selected->ai_socktype, selected->ai_protocol);
+        if (connected == invalid_socket) continue;
+        if (transport == NetworkTransport::tcp) {
+            if (connect_with_timeout(connected, selected->ai_addr, static_cast<int>(selected->ai_addrlen), last_connect_error)) break;
+        } else {
+            if (selected->ai_family == AF_INET) {
+                sockaddr_in local {};
+                local.sin_family = AF_INET;
+                local.sin_addr.s_addr = htonl(INADDR_ANY);
+                if (bind(connected, reinterpret_cast<const sockaddr*>(&local), sizeof(local)) == 0) break;
+            } else if (selected->ai_family == AF_INET6) {
+                sockaddr_in6 local {};
+                local.sin6_family = AF_INET6;
+                if (bind(connected, reinterpret_cast<const sockaddr*>(&local), sizeof(local)) == 0) break;
+            }
+        }
+        if (transport != NetworkTransport::tcp) last_connect_error = socket_error();
+        close_native_socket(connected);
+        connected = invalid_socket;
+    }
+    if (connected == invalid_socket || selected == nullptr) {
+        freeaddrinfo(resolved);
+        last_error_ = "could not connect telemetry "
+            + std::string(transport == NetworkTransport::tcp ? "TCP" : "UDP") + " endpoint " + host + ":" + port_text
+            + " (socket error " + std::to_string(last_connect_error) + ")";
+        return false;
+    }
+
+    fd_ = stored_socket(connected);
+    transport_ = transport;
+    remote_host_ = host;
+    remote_port_ = port;
+    listening_ = false;
+    peer_ = new PeerStorage {};
+    if (transport == NetworkTransport::udp) {
+        std::memcpy(&peer_->address, selected->ai_addr, selected->ai_addrlen);
+        peer_->length = static_cast<int>(selected->ai_addrlen);
+        peer_->valid = true;
+    }
+    freeaddrinfo(resolved);
+    set_nonblocking(connected);
+    last_error_.clear();
+    return true;
+#else
+    (void)transport;
+    (void)host;
+    (void)port;
+    last_error_ = "network telemetry is unavailable on this platform";
+    return false;
+#endif
+}
+
 std::vector<std::string> UdpBridge::poll()
 {
     std::vector<std::string> lines;
-#if defined(__linux__)
+#if defined(_WIN32) || defined(__linux__)
     if (fd_ < 0) {
         return lines;
     }
     std::array<std::uint8_t, 2048> buffer {};
     for (;;) {
-        sockaddr_storage peer_address {};
-        socklen_t peer_length = sizeof(peer_address);
-        const auto received = recvfrom(fd_, buffer.data(), buffer.size(), 0, reinterpret_cast<sockaddr*>(&peer_address), &peer_length);
+        int received {};
+        std::vector<Frame> frames;
+        if (transport_ == NetworkTransport::tcp) {
+            received = recv(native_socket(fd_), reinterpret_cast<char*>(buffer.data()), static_cast<int>(buffer.size()), 0);
+            if (received > 0) {
+                stream_buffer_.insert(stream_buffer_.end(), buffer.begin(), buffer.begin() + received);
+                frames = parse_stream(stream_buffer_);
+            }
+        } else {
+            sockaddr_storage peer_address {};
+#if defined(_WIN32)
+            int peer_length = sizeof(peer_address);
+#else
+            socklen_t peer_length = sizeof(peer_address);
+#endif
+            received = static_cast<int>(recvfrom(native_socket(fd_), reinterpret_cast<char*>(buffer.data()), static_cast<int>(buffer.size()), 0, reinterpret_cast<sockaddr*>(&peer_address), &peer_length));
+            if (received > 0) {
+                if (peer_ != nullptr) {
+                    peer_->address = peer_address;
+                    peer_->length = static_cast<int>(peer_length);
+                    peer_->valid = true;
+                }
+                frames = parse_datagram(buffer.data(), static_cast<std::size_t>(received));
+            }
+        }
         if (received <= 0) {
+            const auto error = socket_error();
+            if (received == 0 && transport_ == NetworkTransport::tcp) {
+                last_error_ = "TCP telemetry peer disconnected";
+                close();
+            }
+            if (received < 0 && !would_block(error)) last_error_ = "telemetry receive error " + std::to_string(error);
             break;
         }
-        if (peer_ != nullptr) {
-            peer_->address = peer_address;
-            peer_->length = peer_length;
-            peer_->valid = true;
-        }
-        for (const auto& frame : parse_datagram(buffer.data(), static_cast<std::size_t>(received))) {
+        for (const auto& frame : frames) {
             if (frame.msgid == 0) {
                 const auto type = read_le<std::uint8_t>(frame.payload, 4);
                 const auto autopilot = read_le<std::uint8_t>(frame.payload, 5);
@@ -472,12 +723,23 @@ bool UdpBridge::send_param_set(const std::string& target, const std::string& nam
 
 bool UdpBridge::send_param_ext_set(const std::string& target, const std::string& name, const std::string& value)
 {
+    char* integer_end {};
+    const auto integer_value = std::strtol(value.c_str(), &integer_end, 10);
+    const bool is_integer = integer_end != value.c_str() && *integer_end == '\0'
+        && integer_value >= std::numeric_limits<std::int32_t>::min()
+        && integer_value <= std::numeric_limits<std::int32_t>::max();
     std::vector<std::uint8_t> payload;
     put_u8(payload, target_system_for(target, air_system_id_, ground_system_id_, flight_controller_system_id_));
     put_u8(payload, target_component_for(target, air_component_id_, ground_component_id_, flight_controller_component_id_));
     put_fixed_string(payload, name, 16);
-    put_fixed_string(payload, value, 128);
-    put_u8(payload, 9);
+    if (is_integer) {
+        put_le<std::int32_t>(payload, static_cast<std::int32_t>(integer_value));
+        payload.insert(payload.end(), 124, 0);
+        put_u8(payload, 6); // MAV_PARAM_EXT_TYPE_INT32
+    } else {
+        put_fixed_string(payload, value, 128);
+        put_u8(payload, 11); // MAV_PARAM_EXT_TYPE_CUSTOM
+    }
     return send_packet(323, 78, payload);
 }
 
@@ -503,8 +765,9 @@ bool UdpBridge::send_command_long(const std::string& command, const std::string&
 
 bool UdpBridge::send_packet(std::uint32_t message_id, std::uint8_t crc_extra, const std::vector<std::uint8_t>& payload)
 {
-#if defined(__linux__)
-    if (fd_ < 0 || peer_ == nullptr || !peer_->valid || payload.size() > 255U) {
+#if defined(_WIN32) || defined(__linux__)
+    if (fd_ < 0 || payload.size() > 255U
+        || (transport_ == NetworkTransport::udp && (peer_ == nullptr || !peer_->valid))) {
         return false;
     }
     std::vector<std::uint8_t> packet;
@@ -527,7 +790,23 @@ bool UdpBridge::send_packet(std::uint32_t message_id, std::uint8_t crc_extra, co
     crc = crc_accumulate(crc_extra, crc);
     packet.push_back(static_cast<std::uint8_t>(crc & 0xffU));
     packet.push_back(static_cast<std::uint8_t>((crc >> 8U) & 0xffU));
-    return sendto(fd_, packet.data(), packet.size(), MSG_NOSIGNAL, reinterpret_cast<const sockaddr*>(&peer_->address), peer_->length) == static_cast<ssize_t>(packet.size());
+    int sent {};
+    if (transport_ == NetworkTransport::tcp) {
+        sent = send(native_socket(fd_), reinterpret_cast<const char*>(packet.data()), static_cast<int>(packet.size()), 0);
+    } else {
+        sent = sendto(
+            native_socket(fd_),
+            reinterpret_cast<const char*>(packet.data()),
+            static_cast<int>(packet.size()),
+#if defined(__linux__)
+            MSG_NOSIGNAL,
+#else
+            0,
+#endif
+            reinterpret_cast<const sockaddr*>(&peer_->address),
+            peer_->length);
+    }
+    return sent == static_cast<int>(packet.size());
 #else
     (void)message_id;
     (void)crc_extra;
@@ -538,19 +817,31 @@ bool UdpBridge::send_packet(std::uint32_t message_id, std::uint8_t crc_extra, co
 
 void UdpBridge::close()
 {
-#if defined(__linux__)
+#if defined(_WIN32) || defined(__linux__)
     if (fd_ >= 0) {
-        ::close(fd_);
+        close_native_socket(native_socket(fd_));
         fd_ = -1;
     }
 #endif
     delete peer_;
     peer_ = nullptr;
+    stream_buffer_.clear();
+    remote_host_.clear();
+    remote_port_ = 0;
+    listening_ = false;
 }
 
 bool UdpBridge::running() const
 {
     return fd_ >= 0;
+}
+
+std::string UdpBridge::connection_description() const
+{
+    if (!running()) return "Disconnected";
+    if (listening_) return "UDP listening 0.0.0.0:" + std::to_string(options_.listen_port);
+    return std::string(transport_ == NetworkTransport::tcp ? "TCP " : "UDP ")
+        + remote_host_ + ":" + std::to_string(remote_port_);
 }
 
 const std::string& UdpBridge::last_error() const

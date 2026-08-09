@@ -13,7 +13,13 @@
 #include <sstream>
 #include <thread>
 
-#if defined(__linux__)
+#if defined(_WIN32)
+#define NOMINMAX
+#define WIN32_LEAN_AND_MEAN
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#pragma comment(lib, "ws2_32.lib")
+#elif defined(__linux__)
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <ifaddrs.h>
@@ -30,12 +36,40 @@ namespace {
 constexpr const char* discover_prefix = "OPENHD_GLIDE_DISCOVER";
 constexpr const char* here_prefix = "OPENHD_GLIDE_HERE";
 
-#if defined(__linux__)
-bool set_nonblocking(int fd)
+#if defined(_WIN32)
+using NativeSocket = SOCKET;
+constexpr NativeSocket invalid_socket = INVALID_SOCKET;
+bool ensure_socket_runtime()
+{
+    static const bool initialized = [] {
+        WSADATA data {};
+        return WSAStartup(MAKEWORD(2, 2), &data) == 0;
+    }();
+    return initialized;
+}
+int socket_error() { return WSAGetLastError(); }
+void close_native_socket(NativeSocket socket) { closesocket(socket); }
+bool set_nonblocking(NativeSocket socket)
+{
+    u_long enabled = 1;
+    return ioctlsocket(socket, FIONBIO, &enabled) == 0;
+}
+#elif defined(__linux__)
+using NativeSocket = int;
+constexpr NativeSocket invalid_socket = -1;
+bool ensure_socket_runtime() { return true; }
+int socket_error() { return errno; }
+void close_native_socket(NativeSocket socket) { close(socket); }
+bool set_nonblocking(NativeSocket fd)
 {
     const auto flags = fcntl(fd, F_GETFL, 0);
     return flags >= 0 && fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0;
 }
+#endif
+
+#if defined(_WIN32) || defined(__linux__)
+NativeSocket native_socket(std::intptr_t value) { return static_cast<NativeSocket>(value); }
+std::intptr_t stored_socket(NativeSocket value) { return static_cast<std::intptr_t>(value); }
 
 std::string address_to_string(const sockaddr_in& address)
 {
@@ -54,6 +88,8 @@ std::string local_hostname()
     }
     return "glide";
 }
+
+#if defined(__linux__)
 
 std::vector<sockaddr_in> broadcast_addresses(std::uint16_t port)
 {
@@ -147,6 +183,8 @@ std::string run_ip_command(const std::vector<std::string>& args)
 }
 #endif
 
+#endif
+
 std::string sanitize_token(std::string value)
 {
     for (auto& character : value) {
@@ -171,40 +209,49 @@ bool DiscoveryService::start(const DiscoveryOptions& options)
 #endif
     );
 
-#if defined(__linux__)
-    fd_ = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
-    if (fd_ < 0) {
-        last_error_ = std::string("socket failed: ") + std::strerror(errno);
+#if defined(_WIN32) || defined(__linux__)
+    if (!ensure_socket_runtime()) {
+        last_error_ = "socket runtime initialization failed";
         return false;
     }
+#if defined(__linux__)
+    const auto fd = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+#else
+    const auto fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+#endif
+    if (fd == invalid_socket) {
+        last_error_ = "socket failed: " + std::to_string(socket_error());
+        return false;
+    }
+    fd_ = stored_socket(fd);
 
     int enabled = 1;
-    setsockopt(fd_, SOL_SOCKET, SO_REUSEADDR, &enabled, sizeof(enabled));
-    setsockopt(fd_, SOL_SOCKET, SO_BROADCAST, &enabled, sizeof(enabled));
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&enabled), sizeof(enabled));
+    setsockopt(fd, SOL_SOCKET, SO_BROADCAST, reinterpret_cast<const char*>(&enabled), sizeof(enabled));
 
     sockaddr_in address {};
     address.sin_family = AF_INET;
     address.sin_addr.s_addr = htonl(INADDR_ANY);
     address.sin_port = htons(options_.discovery_udp_port);
-    if (bind(fd_, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0) {
-        last_error_ = std::string("bind UDP discovery failed: ") + std::strerror(errno);
+    if (bind(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0) {
+        last_error_ = "bind UDP discovery failed: " + std::to_string(socket_error());
         stop();
         return false;
     }
-    set_nonblocking(fd_);
+    set_nonblocking(fd);
     pending_lines_.push_back("state net idle");
     return true;
 #else
-    last_error_ = "network discovery requires Linux sockets";
+    last_error_ = "network discovery is unavailable on this platform";
     return false;
 #endif
 }
 
 void DiscoveryService::stop()
 {
-#if defined(__linux__)
+#if defined(_WIN32) || defined(__linux__)
     if (fd_ >= 0) {
-        close(fd_);
+        close_native_socket(native_socket(fd_));
         fd_ = -1;
     }
 #endif
@@ -241,13 +288,17 @@ std::vector<std::string> DiscoveryService::poll_state_lines()
         next_probe_ = now + std::chrono::milliseconds(450);
     }
 
-#if defined(__linux__)
+#if defined(_WIN32) || defined(__linux__)
     if (running()) {
         char buffer[512] {};
         for (;;) {
             sockaddr_in sender {};
+#if defined(_WIN32)
+            int sender_size = sizeof(sender);
+#else
             socklen_t sender_size = sizeof(sender);
-            const auto bytes = recvfrom(fd_, buffer, sizeof(buffer) - 1U, 0, reinterpret_cast<sockaddr*>(&sender), &sender_size);
+#endif
+            const auto bytes = recvfrom(native_socket(fd_), buffer, static_cast<int>(sizeof(buffer) - 1U), 0, reinterpret_cast<sockaddr*>(&sender), &sender_size);
             if (bytes <= 0) {
                 break;
             }
@@ -274,14 +325,23 @@ const std::vector<Peer>& DiscoveryService::peers() const
 
 bool DiscoveryService::send_broadcast_probe()
 {
-#if defined(__linux__)
+#if defined(_WIN32) || defined(__linux__)
     if (!running()) {
         return false;
     }
     const auto payload = std::string(discover_prefix) + " 1 " + hostname_ + " " + std::to_string(options_.video_udp_port);
     bool sent {};
-    for (const auto& destination : broadcast_addresses(options_.discovery_udp_port)) {
-        sent = sendto(fd_, payload.data(), payload.size(), MSG_NOSIGNAL, reinterpret_cast<const sockaddr*>(&destination), sizeof(destination)) >= 0 || sent;
+#if defined(__linux__)
+    const auto destinations = broadcast_addresses(options_.discovery_udp_port);
+#else
+    sockaddr_in destination {};
+    destination.sin_family = AF_INET;
+    destination.sin_port = htons(options_.discovery_udp_port);
+    destination.sin_addr.s_addr = htonl(INADDR_BROADCAST);
+    const std::vector<sockaddr_in> destinations { destination };
+#endif
+    for (const auto& destination : destinations) {
+        sent = sendto(native_socket(fd_), payload.data(), static_cast<int>(payload.size()), 0, reinterpret_cast<const sockaddr*>(&destination), sizeof(destination)) >= 0 || sent;
     }
     return sent;
 #else
@@ -306,13 +366,13 @@ void DiscoveryService::handle_packet(const std::string& payload, const std::stri
     }
 
     if (prefix == discover_prefix) {
-#if defined(__linux__)
+#if defined(_WIN32) || defined(__linux__)
         const auto reply = std::string(here_prefix) + " 1 " + hostname_ + " " + std::to_string(options_.video_udp_port);
         sockaddr_in destination {};
         destination.sin_family = AF_INET;
         destination.sin_port = htons(options_.discovery_udp_port);
         inet_pton(AF_INET, sender_address.c_str(), &destination.sin_addr);
-        sendto(fd_, reply.data(), reply.size(), MSG_NOSIGNAL, reinterpret_cast<const sockaddr*>(&destination), sizeof(destination));
+        sendto(native_socket(fd_), reply.data(), static_cast<int>(reply.size()), 0, reinterpret_cast<const sockaddr*>(&destination), sizeof(destination));
 #endif
         return;
     }

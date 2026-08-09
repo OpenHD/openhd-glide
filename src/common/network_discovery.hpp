@@ -49,7 +49,7 @@ private:
     void handle_packet(const std::string& payload, const std::string& sender_address);
     void upsert_peer(Peer peer);
 
-    int fd_ { -1 };
+    std::intptr_t fd_ { -1 };
     DiscoveryOptions options_;
     std::string hostname_ { "glide" };
     std::string last_error_;

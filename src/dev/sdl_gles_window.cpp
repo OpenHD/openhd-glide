@@ -23,6 +23,8 @@
 
 #include "dev/sdl_gles_window.hpp"
 
+#include <utility>
+
 #if OPENHD_GLIDE_HAS_SDL2
 #include <SDL.h>
 #endif
@@ -62,6 +64,13 @@ bool SdlGlesWindow::create(const char* title, std::uint32_t width, std::uint32_t
 bool SdlGlesWindow::create(const char* title, WindowPlacement placement)
 {
 #if OPENHD_GLIDE_HAS_SDL2 && OPENHD_GLIDE_HAS_GLESV2
+#if defined(_WIN32)
+    // ANGLE supplies GLES on Windows; ask SDL to create its context through EGL.
+    SDL_SetHint("SDL_WINDOWS_DPI_AWARENESS", "permonitorv2");
+    SDL_SetHint("SDL_WINDOWS_DPI_SCALING", "0");
+    SDL_SetHint("SDL_OPENGL_ES_DRIVER", "1");
+    SDL_SetHint("SDL_VIDEO_FORCE_EGL", "1");
+#endif
     if (SDL_InitSubSystem(SDL_INIT_VIDEO) != 0) {
         last_error_ = SDL_GetError();
         return false;
@@ -104,7 +113,9 @@ bool SdlGlesWindow::create(const char* title, WindowPlacement placement)
         return false;
     }
 
-    SDL_GL_SetSwapInterval(0);
+    if (SDL_GL_SetSwapInterval(-1) != 0) {
+        SDL_GL_SetSwapInterval(1);
+    }
     surface_ = flow::SurfaceSize {
         .width = placement.width,
         .height = placement.height,
@@ -135,9 +146,38 @@ bool SdlGlesWindow::poll()
             click_y_ = event.button.y;
             has_click_ = true;
         }
+        if (event.type == SDL_KEYDOWN && event.key.repeat == 0) {
+            switch (event.key.keysym.sym) {
+            case SDLK_m: key_ = "m"; break;
+            case SDLK_n: key_ = "n"; break;
+            case SDLK_SPACE: key_ = "space"; break;
+            case SDLK_PLUS:
+            case SDLK_KP_PLUS:
+            case SDLK_EQUALS: key_ = "+"; break;
+            case SDLK_MINUS:
+            case SDLK_KP_MINUS: key_ = "-"; break;
+            case SDLK_UP: key_ = "up"; break;
+            case SDLK_DOWN: key_ = "down"; break;
+            case SDLK_LEFT: key_ = "left"; break;
+            case SDLK_RIGHT: key_ = "right"; break;
+            case SDLK_RETURN:
+            case SDLK_KP_ENTER: key_ = "enter"; break;
+            case SDLK_ESCAPE:
+            case SDLK_BACKSPACE: key_ = "back"; break;
+            default: break;
+            }
+        }
     }
 #endif
 
+    return true;
+}
+
+bool SdlGlesWindow::consume_key(std::string& key)
+{
+    if (key_.empty()) return false;
+    key = std::move(key_);
+    key_.clear();
     return true;
 }
 

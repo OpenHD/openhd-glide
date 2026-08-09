@@ -67,8 +67,18 @@ public:
         RenderPoint top_left,
         SurfaceSize surface);
     bool update_argb_texture(const void* pixels, std::uint32_t width, std::uint32_t height, std::uint32_t stride_bytes);
+    bool update_rgba_texture(const void* pixels, std::uint32_t width, std::uint32_t height, std::uint32_t stride_bytes);
     void draw_cached_argb_texture(RenderPoint top_left, SurfaceSize surface);
     void draw_cached_argb_texture_scaled(RenderPoint top_left, float width, float height, SurfaceSize surface);
+    void draw_cached_argb_texture_region(
+        RenderPoint top_left,
+        float width,
+        float height,
+        float u0,
+        float v0,
+        float u1,
+        float v1,
+        SurfaceSize surface);
     void set_text_color(RgbaColor color);
     void draw(const TextPlacement& placement, SurfaceSize surface);
     float measure_text_width(std::string_view text, float scale);
@@ -105,10 +115,12 @@ private:
     std::int32_t image_position_location_ { -1 };
     std::int32_t image_texcoord_location_ { -1 };
     std::int32_t image_sampler_location_ { -1 };
+    std::int32_t image_swap_red_blue_location_ { -1 };
     std::uint32_t image_texture_ {};
     std::uint32_t image_texture_width_ {};
     std::uint32_t image_texture_height_ {};
     bool image_texture_ready_ {};
+    bool image_swap_red_blue_ { true };
     RgbaColor text_color_ { .red = 0.92F, .green = 0.96F, .blue = 1.0F, .alpha = 0.98F };
     void* freetype_library_ {};
     void* freetype_face_ {};

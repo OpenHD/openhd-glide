@@ -1,0 +1,432 @@
+################################################################################
+# OpenHD
+#
+# Licensed under the GNU General Public License (GPL) Version 3.
+#
+# This software is provided "as-is," without warranty of any kind, express or
+# implied, including but not limited to the warranties of merchantability,
+# fitness for a particular purpose, and non-infringement. For details, see the
+# full license in the LICENSE file provided with this source code.
+#
+# Non-Military Use Only:
+# This software and its associated components are explicitly intended for
+# civilian and non-military purposes. Use in any military or defense
+# applications is strictly prohibited unless explicitly and individually
+# licensed otherwise by the OpenHD Team.
+#
+# Contributors:
+# A full list of contributors can be found at the OpenHD GitHub repository:
+# https://github.com/OpenHD
+#
+# © OpenHD, All Rights Reserved.
+################################################################################
+
+name: final_ci
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, dev-release, release, openhd-3.0]
+  pull_request:
+    branches: [main, dev-release, release, openhd-3.0]
+
+concurrency:
+  group: final-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  architecture-packages:
+    name: package-${{ matrix.architecture }}
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - architecture: amd64
+            distro: ubuntu
+            release: jammy
+          - architecture: arm64
+            triplet: aarch64-linux-gnu
+            compiler_packages: gcc-10-aarch64-linux-gnu g++-10-aarch64-linux-gnu
+            distro: debian
+            release: bullseye
+          - architecture: armhf
+            triplet: arm-linux-gnueabihf
+            compiler_packages: gcc-10-arm-linux-gnueabihf g++-10-arm-linux-gnueabihf
+            distro: raspbian
+            release: bullseye
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install native build dependencies
+        if: matrix.architecture == 'amd64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake dpkg-dev file git make ninja-build pkg-config \
+            libdrm-dev libgbm-dev libegl1-mesa-dev libgles2-mesa-dev \
+            libfreetype6-dev libgstreamer1.0-dev \
+            libgstreamer-plugins-base1.0-dev zlib1g-dev
+
+      - name: Install cross-build tools
+        if: matrix.architecture != 'amd64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ${{ matrix.compiler_packages }} \
+            cmake curl dpkg-dev file git make ninja-build pkg-config zstd
+
+      - name: Fetch verified shared OpenHD sysroot
+        if: matrix.architecture != 'amd64'
+        run: |
+          archive="openhd-sysroot-bullseye-${{ matrix.architecture }}.tar.zst"
+          base=https://dl.cloudsmith.io/public/openhd/dev-release/raw/files
+          checksum="$(curl -fsSL "${base}/${archive}.sha256" | awk 'NR == 1 { print $1 }')"
+          test "${#checksum}" -eq 64
+          ./scripts/fetch_cross_sysroot.sh \
+            "${base}/${archive}" "${checksum}" \
+            "${RUNNER_TEMP}/sysroot-${{ matrix.architecture }}"
+
+      - name: Validate shared sysroot and add ARM64 RKMPP
+        if: matrix.architecture != 'amd64'
+        run: |
+          ./scripts/prepare_cross_sysroot.sh \
+            "${RUNNER_TEMP}/sysroot-${{ matrix.architecture }}" \
+            "${{ matrix.architecture }}"
+
+      - name: Build native AMD64 package
+        if: matrix.architecture == 'amd64'
+        env:
+          OPENHD_GLIDE_PACKAGE_VERSION: 0.1.0.${{ github.run_number }}
+        run: |
+          cmake -S . -B "${RUNNER_TEMP}/build-amd64" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DOPENHD_GLIDE_ENABLE_SDL2=OFF \
+            -DOPENHD_GLIDE_ENABLE_CEDAR=OFF \
+            -DOPENHD_GLIDE_ENABLE_RKMPP=OFF \
+            -DOPENHD_GLIDE_ENABLE_IMXVPU=OFF \
+            -DOPENHD_GLIDE_REQUIRE_KMS_GBM=ON \
+            -DOPENHD_GLIDE_REQUIRE_GSTREAMER=ON \
+            -DOPENHD_GLIDE_REQUIRE_FREETYPE=ON \
+            -DOPENHD_GLIDE_PACKAGE_VERSION="${OPENHD_GLIDE_PACKAGE_VERSION}" \
+            -DOPENHD_GLIDE_PACKAGE_ARCHITECTURE=amd64 \
+            -DOPENHD_GLIDE_EXTRA_DEBIAN_DEPENDS="gstreamer1.0-tools, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad, gstreamer1.0-plugins-ugly, gstreamer1.0-libav"
+          cmake --build "${RUNNER_TEMP}/build-amd64" --parallel "$(nproc)" --target package
+          find "${RUNNER_TEMP}/build-amd64" -maxdepth 1 -name '*.deb' -exec cp {} . \;
+
+      - name: Cross-build portable ARM package
+        if: matrix.architecture != 'amd64'
+        env:
+          OPENHD_GLIDE_PACKAGE_VERSION: 0.1.0.${{ github.run_number }}
+        run: |
+          ./scripts/build_portable_cross.sh \
+            "${{ matrix.architecture }}" \
+            "${RUNNER_TEMP}/sysroot-${{ matrix.architecture }}" \
+            "${RUNNER_TEMP}/build-${{ matrix.architecture }}"
+          find "${RUNNER_TEMP}/build-${{ matrix.architecture }}" \
+            -maxdepth 1 -name '*.deb' -exec cp {} . \;
+
+      - name: Validate package portability
+        run: |
+          package="$(find . -maxdepth 1 -name 'openhd-glide_*.deb' -print -quit)"
+          test -n "${package}"
+          test "$(dpkg-deb -f "${package}" Package)" = openhd-glide
+          test "$(dpkg-deb -f "${package}" Architecture)" = "${{ matrix.architecture }}"
+          dpkg-deb -f "${package}" Conflicts | grep -q openhd-glide-rock5a
+          mkdir package-root
+          dpkg-deb -x "${package}" package-root
+          test ! -e package-root/usr/lib/openhd-glide/librockchip_mpp.so.1
+          readelf -d package-root/usr/bin/openhd-glide | tee openhd-glide-needed.txt
+          if [[ "${{ matrix.architecture }}" == arm64 ]]; then
+            grep -q 'librockchip_mpp.so.1' openhd-glide-needed.txt
+          elif grep -q 'librockchip_mpp' openhd-glide-needed.txt; then
+            echo 'Non-Rockchip architecture unexpectedly links RKMPP.' >&2
+            exit 1
+          fi
+          # The literal ELF token must not expand.
+          # shellcheck disable=SC2016
+          if grep -q '\$ORIGIN/../lib/openhd-glide' openhd-glide-needed.txt; then
+            echo 'Package must use the board-provided RKMPP runtime, not a bundled ABI.' >&2
+            exit 1
+          fi
+          ar t "${package}" | grep -Eq '^control\.tar\.(gz|xz)$'
+          ar t "${package}" | grep -qx data.tar.xz
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OpenHD-Glide-${{ matrix.architecture }}
+          path: |
+            openhd-glide_*_${{ matrix.architecture }}.deb
+            openhd-glide-needed.txt
+          if-no-files-found: error
+
+      - name: Resolve Cloudsmith target
+        if: github.event_name != 'pull_request'
+        id: cloudsmith
+        run: |
+          if [[ "${GITHUB_REF_NAME}" == main || "${GITHUB_REF_NAME}" == openhd-3.0 ]]; then
+            echo repo=dev-release >> "${GITHUB_OUTPUT}"
+          else
+            echo "repo=${GITHUB_REF_NAME}" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Publish universal package
+        if: github.event_name != 'pull_request'
+        uses: cloudsmith-io/action@v0.6.14
+        with:
+          api-key: ${{ secrets.CLOUDSMITH_API_KEY }}
+          command: push
+          format: deb
+          owner: openhd
+          repo: ${{ steps.cloudsmith.outputs.repo }}
+          distro: any-distro
+          release: any-version
+          republish: "true"
+          file: openhd-glide_*_${{ matrix.architecture }}.deb
+
+      - name: Publish for primary build distribution
+        if: github.event_name != 'pull_request'
+        uses: cloudsmith-io/action@v0.6.14
+        with:
+          api-key: ${{ secrets.CLOUDSMITH_API_KEY }}
+          command: push
+          format: deb
+          owner: openhd
+          repo: ${{ steps.cloudsmith.outputs.repo }}
+          distro: ${{ matrix.distro }}
+          release: ${{ matrix.release }}
+          republish: "true"
+          file: openhd-glide_*_${{ matrix.architecture }}.deb
+
+      - name: Publish ARM64 for Debian Bookworm
+        if: github.event_name != 'pull_request' && matrix.architecture == 'arm64'
+        uses: cloudsmith-io/action@v0.6.14
+        with:
+          api-key: ${{ secrets.CLOUDSMITH_API_KEY }}
+          command: push
+          format: deb
+          owner: openhd
+          repo: ${{ steps.cloudsmith.outputs.repo }}
+          distro: debian
+          release: bookworm
+          republish: "true"
+          file: openhd-glide_*_arm64.deb
+
+      - name: Publish ARM64 for Raspbian Bullseye
+        if: github.event_name != 'pull_request' && matrix.architecture == 'arm64'
+        uses: cloudsmith-io/action@v0.6.14
+        with:
+          api-key: ${{ secrets.CLOUDSMITH_API_KEY }}
+          command: push
+          format: deb
+          owner: openhd
+          repo: ${{ steps.cloudsmith.outputs.repo }}
+          distro: raspbian
+          release: bullseye
+          republish: "true"
+          file: openhd-glide_*_arm64.deb
+
+      - name: Publish ARM64 for Raspbian Bookworm
+        if: github.event_name != 'pull_request' && matrix.architecture == 'arm64'
+        uses: cloudsmith-io/action@v0.6.14
+        with:
+          api-key: ${{ secrets.CLOUDSMITH_API_KEY }}
+          command: push
+          format: deb
+          owner: openhd
+          repo: ${{ steps.cloudsmith.outputs.repo }}
+          distro: raspbian
+          release: bookworm
+          republish: "true"
+          file: openhd-glide_*_arm64.deb
+
+      - name: Publish AMD64 for Ubuntu Noble
+        if: github.event_name != 'pull_request' && matrix.architecture == 'amd64'
+        uses: cloudsmith-io/action@v0.6.14
+        with:
+          api-key: ${{ secrets.CLOUDSMITH_API_KEY }}
+          command: push
+          format: deb
+          owner: openhd
+          repo: ${{ steps.cloudsmith.outputs.repo }}
+          distro: ubuntu
+          release: noble
+          republish: "true"
+          file: openhd-glide_*_amd64.deb
+
+  cedar-platform-packages:
+    name: package-${{ matrix.package_suffix }}
+    if: github.event_name != 'pull_request'
+    needs: architecture-packages
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image_type: orangepi-zero3w-lite
+            package_suffix: orangepi-zero3w
+            package_arch: arm64
+            cloudsmith_distro: debian
+            release: bookworm
+            radxa_repo_suite: bookworm
+            extra_debian_depends: "gstreamer1.0-tools, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad, gstreamer1.0-plugins-ugly, gstreamer1.0-libav"
+          - image_type: radxa-cubie
+            package_suffix: radxa-cubie
+            package_arch: arm64
+            cloudsmith_distro: debian
+            release: bullseye
+            radxa_repo_suite: bullseye
+            extra_debian_depends: "gstreamer1.0-tools, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad, gstreamer1.0-plugins-ugly, gstreamer1.0-libav"
+    steps:
+      - uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 512
+          swap-size-mb: 1024
+          remove-dotnet: "true"
+          remove-android: "true"
+          remove-haskell: "true"
+          overprovision-lvm: "true"
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Build native Cedar package in chroot
+        env:
+          GLIDE_IMAGE_TYPE: ${{ matrix.image_type }}
+          GLIDE_PACKAGE_SUFFIX: ${{ matrix.package_suffix }}
+          GLIDE_PACKAGE_ARCH: ${{ matrix.package_arch }}
+          GLIDE_CLOUDSMITH_DISTRO: ${{ matrix.cloudsmith_distro }}
+          GLIDE_RELEASE: ${{ matrix.release }}
+          GLIDE_RADXA_REPO_SUITE: ${{ matrix.radxa_repo_suite }}
+          GLIDE_REQUIRE_RKMPP: "0"
+          GLIDE_EXTRA_DEBIAN_DEPENDS: ${{ matrix.extra_debian_depends }}
+          CLOUDSMITH_API_KEY: ${{ secrets.CLOUDSMITH_API_KEY }}
+          API_KEY: ${{ secrets.CLOUDSMITH_API_KEY }}
+        run: bash scripts/ci-build-platform-package.sh
+      - name: Collect artifacts
+        run: find /opt/OpenHD-ChrootCompiler/out "$GITHUB_WORKSPACE"/chroot-out-* -maxdepth 1 -name '*.deb' -exec cp {} . \;
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OpenHD-Glide-${{ matrix.package_suffix }}-${{ matrix.release }}
+          path: '*.deb'
+          if-no-files-found: error
+      - name: Publish Cedar package
+        if: github.event_name != 'pull_request'
+        uses: cloudsmith-io/action@v0.6.14
+        with:
+          api-key: ${{ secrets.CLOUDSMITH_API_KEY }}
+          command: push
+          format: deb
+          owner: openhd
+          repo: ${{ github.ref_name == 'main' && 'dev-release' || github.ref_name }}
+          distro: ${{ matrix.cloudsmith_distro }}
+          release: ${{ matrix.release }}
+          republish: "true"
+          file: '*.deb'
+
+  orqa:
+    name: build-orqa
+    if: github.event_name != 'pull_request'
+    needs: architecture-packages
+    runs-on: ubuntu-22.04
+    env:
+      DOWNLOAD_KEY: ${{ secrets.DOWNLOAD_KEY }}
+      DOWNLOAD_URL: ${{ secrets.DOWNLOAD_URL }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check Orqa SDK configuration
+        id: orqa_sdk
+        run: |
+          if [ -n "${DOWNLOAD_KEY}" ] && [ -n "${DOWNLOAD_URL}" ]; then
+            echo "available=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "available=false" >> "${GITHUB_OUTPUT}"
+            echo "::notice::Skipping Orqa because DOWNLOAD_KEY or DOWNLOAD_URL is not configured."
+          fi
+
+      - name: Install Orqa SDK tooling
+        if: steps.orqa_sdk.outputs.available == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            curl ninja-build pkg-config xz-utils
+
+      - name: Install Orqa SDK
+        if: steps.orqa_sdk.outputs.available == 'true'
+        run: |
+          mkdir -p "${RUNNER_TEMP}/orqa-sdk"
+          curl -fsSL -u "${DOWNLOAD_KEY}" "${DOWNLOAD_URL}" \
+            -o "${RUNNER_TEMP}/orqa-sdk-installer.sh"
+          sh "${RUNNER_TEMP}/orqa-sdk-installer.sh" \
+            -y -d "${RUNNER_TEMP}/orqa-sdk"
+
+      - name: Cross-build and verify Orqa artifact
+        if: steps.orqa_sdk.outputs.available == 'true'
+        run: |
+          source "${RUNNER_TEMP}/orqa-sdk/environment-setup-armv8a-poky-linux"
+          cmake -S . -B build-orqa -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/usr \
+            -DOPENHD_GLIDE_DEVICE_KMS=ON \
+            -DOPENHD_GLIDE_REQUIRE_KMS_GBM=ON \
+            -DOPENHD_GLIDE_ENABLE_GSTREAMER=OFF \
+            -DOPENHD_GLIDE_REQUIRE_GSTREAMER=OFF \
+            -DOPENHD_GLIDE_REQUIRE_FREETYPE=ON \
+            -DOPENHD_GLIDE_ENABLE_SDL2=OFF \
+            -DOPENHD_GLIDE_ENABLE_CEDAR=OFF \
+            -DOPENHD_GLIDE_ENABLE_RKMPP=OFF \
+            -DOPENHD_GLIDE_REQUIRE_RKMPP=OFF \
+            -DOPENHD_GLIDE_ENABLE_IMXVPU=ON \
+            -DOPENHD_GLIDE_REQUIRE_IMXVPU=ON \
+            -DOPENHD_GLIDE_PREFER_SYSTEM_MESA=OFF
+          cmake --build build-orqa --parallel
+          bash scripts/verify-orqa-runtime-abi.sh build-orqa
+
+      - name: Package Orqa rootfs
+        if: steps.orqa_sdk.outputs.available == 'true'
+        env:
+          DESTDIR: ${{ runner.temp }}/openhd-glide-orqa-rootfs
+        run: |
+          source "${RUNNER_TEMP}/orqa-sdk/environment-setup-armv8a-poky-linux"
+          cmake --install build-orqa
+          find "${DESTDIR}/usr/bin" -maxdepth 1 -type f \
+            -exec "${STRIP}" --strip-unneeded {} +
+          cp build-orqa/orqa-needed.txt "${DESTDIR}/"
+          tar -C "${DESTDIR}" -czf openhd-glide-orqa-aarch64.tar.gz .
+
+      - name: Upload Orqa artifact
+        if: steps.orqa_sdk.outputs.available == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: openhd-glide-orqa-aarch64
+          path: |
+            openhd-glide-orqa-aarch64.tar.gz
+            build-orqa/orqa-needed.txt
+          if-no-files-found: error
+
+  trigger-images:
+    name: trigger-image-matrix
+    if: github.event_name == 'push'
+    needs:
+      - architecture-packages
+      - cedar-platform-packages
+      - orqa
+    runs-on: ubuntu-22.04
+    env:
+      GH_TOKEN: ${{ secrets.OPENHD_SUBMODULE_TOKEN }}
+    steps:
+      - name: Start ImageBuilder after packages are published
+        if: env.GH_TOKEN != ''
+        run: |
+          gh api --method POST \
+            /repos/OpenHD/OpenHD-ImageBuilder/actions/workflows/update-image.yml/dispatches \
+            -f ref=dev-release
+      - name: Report unavailable cross-repository dispatch
+        if: env.GH_TOKEN == ''
+        run: echo "ImageBuilder dispatch skipped because OPENHD_SUBMODULE_TOKEN is not configured in this repository."

@@ -35,6 +35,7 @@
 #include "glide_flow/fps_counter.hpp"
 #include "glide_flow/fps_overlay.hpp"
 #include "glide_flow/gles_text_renderer.hpp"
+#include "glide_flow/gpu_map_renderer.hpp"
 #include "glide_flow/link_overview.hpp"
 #include "glide_flow/osd_theme.hpp"
 #include "glide_flow/performance_horizon.hpp"
@@ -70,6 +71,10 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#elif defined(_WIN32)
+#define NOMINMAX
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
 #endif
 
 #if OPENHD_GLIDE_HAS_GSTREAMER
@@ -355,6 +360,8 @@ struct RuntimeControlState {
     bool compact_readouts { false };
     bool top_bar_enabled { true };
     std::string osd_layout { glide::preview_control::osd_layout() };
+    std::string telemetry_connection { "Disconnected" };
+    glide::flow::GpuMapState gpu_map;
 };
 
 void start_mavlink_bridge(glide::mavlink::UdpBridge& bridge, const Options& options);
@@ -367,6 +374,7 @@ void send_initial_control_state(glide::ipc::Server& ipc_server, int client_id, c
     ipc_server.send_line(client_id, std::string("state compact ") + (state.compact_readouts ? "1" : "0"));
     ipc_server.send_line(client_id, std::string("state topbar ") + (state.top_bar_enabled ? "1" : "0"));
     ipc_server.send_line(client_id, "state osd " + state.osd_layout);
+    ipc_server.send_line(client_id, "state telemetry " + state.telemetry_connection);
     send_theme_state(ipc_server, client_id);
 }
 
@@ -408,6 +416,51 @@ bool handle_network_line(const std::string& line, glide::ipc::Server& ipc_server
     return false;
 }
 
+bool handle_telemetry_connection_line(
+    const std::string& line,
+    glide::ipc::Server& ipc_server,
+    int client_id,
+    glide::mavlink::UdpBridge& bridge,
+    std::string& connection)
+{
+    if (line == "get telemetry connection") {
+        ipc_server.send_line(client_id, "state telemetry " + connection);
+        return true;
+    }
+    if (line == "net telemetry disconnect") {
+        bridge.close();
+        connection = "Disconnected";
+        ipc_server.broadcast_line("state telemetry " + connection);
+        return true;
+    }
+    if (line.rfind("net telemetry connect ", 0) != 0) return false;
+
+    std::istringstream command(line);
+    std::string net_word;
+    std::string telemetry_word;
+    std::string connect_word;
+    std::string protocol;
+    std::string host;
+    unsigned int port {};
+    command >> net_word >> telemetry_word >> connect_word >> protocol >> host;
+    if (protocol == "tcp") {
+        port = glide::mavlink::openhd_ground_tcp_port;
+    } else {
+        command >> port;
+    }
+    const auto transport = protocol == "tcp"
+        ? glide::mavlink::NetworkTransport::tcp
+        : glide::mavlink::NetworkTransport::udp;
+    if ((protocol == "tcp" || protocol == "udp") && !host.empty() && port > 0 && port <= 65535
+        && bridge.connect_to(transport, host, static_cast<std::uint16_t>(port))) {
+        connection = bridge.connection_description();
+    } else {
+        connection = "Error: " + bridge.last_error();
+    }
+    ipc_server.broadcast_line("state telemetry " + connection);
+    return true;
+}
+
 bool poll_runtime_controls(
     glide::ipc::Server& ipc_server,
     glide::mavlink::UdpBridge& mavlink_bridge,
@@ -429,6 +482,10 @@ bool poll_runtime_controls(
         }
         ipc_server.broadcast_line(line);
     }
+    if (state.telemetry_connection.rfind("TCP ", 0) == 0 && !mavlink_bridge.running()) {
+        state.telemetry_connection = "Error: " + mavlink_bridge.last_error();
+        ipc_server.broadcast_line("state telemetry " + state.telemetry_connection);
+    }
     for (const auto& line : discovery.poll_state_lines()) {
         ipc_server.broadcast_line(line);
     }
@@ -448,6 +505,7 @@ bool poll_runtime_controls(
             ipc_server.send_line(event.client_id, "state osd " + state.osd_layout);
         } else if (event.line == "get theme") {
             send_theme_state(ipc_server, event.client_id);
+        } else if (handle_telemetry_connection_line(event.line, ipc_server, event.client_id, mavlink_bridge, state.telemetry_connection)) {
         } else if (handle_network_line(event.line, ipc_server, event.client_id, discovery)) {
         } else if (event.line == "set fps 0" || event.line == "set fps 1") {
             state.fps_enabled = event.line.back() == '1';
@@ -474,6 +532,7 @@ bool poll_runtime_controls(
             mavlink_bridge.handle_action_line(event.line);
             ipc_server.broadcast_line(event.line);
         } else if (event.line.rfind("ui ", 0) == 0) {
+            glide::flow::apply_gpu_map_ipc_line(state.gpu_map, event.line);
             ipc_server.broadcast_line(event.line);
         } else if (event.line == "ping") {
             ipc_server.send_line(event.client_id, "pong");
@@ -485,6 +544,12 @@ bool poll_runtime_controls(
 Options parse_options(int argc, char** argv)
 {
     Options options;
+#if defined(_WIN32)
+    char temp_path[MAX_PATH] {};
+    if (GetTempPathA(MAX_PATH, temp_path) != 0) {
+        options.ui_buffer_path = std::string(temp_path) + "openhd-glide-ui.argb";
+    }
+#endif
     for (int i = 1; i < argc; ++i) {
         const std::string argument = argv[i];
         if (argument == "--preview-stack") {
@@ -602,7 +667,7 @@ Options parse_options(int argc, char** argv)
 std::string executable_dir(char* argv0)
 {
     const std::string path = argv0 != nullptr ? argv0 : "";
-    const auto slash = path.find_last_of('/');
+    const auto slash = path.find_last_of("/\\");
     if (slash == std::string::npos) {
         return {};
     }
@@ -613,16 +678,42 @@ std::string sibling_executable(char* argv0, const char* name)
 {
     const auto dir = executable_dir(argv0);
     if (dir.empty()) {
-        return name;
+        return std::string(name)
+#if defined(_WIN32)
+            + ".exe"
+#endif
+            ;
     }
-    return dir + name;
+    return dir + name
+#if defined(_WIN32)
+        + std::string(".exe")
+#endif
+        ;
 }
 
 std::vector<std::string> preview_args(const char* executable, const Options& options, bool ui)
 {
     const auto y = (ui || !options.vertical_stack) ? options.preview_y : options.preview_y + static_cast<int>(options.ui_height);
-    const auto height = ui ? options.ui_height : options.flow_height;
-    const auto width = ui ? options.ui_width : options.preview_width;
+    auto height = ui ? options.ui_height : options.flow_height;
+    auto width = ui ? options.ui_width : options.preview_width;
+#if defined(_WIN32)
+    if (ui) {
+        width = options.preview_width;
+        height = options.flow_height;
+        return {
+            executable,
+            "--buffer",
+            "--width",
+            std::to_string(width),
+            "--height",
+            std::to_string(height),
+            "--buffer-path",
+            options.ui_buffer_path,
+            "--ipc-socket",
+            options.ipc_socket,
+        };
+    }
+#endif
     auto args = std::vector<std::string> {
         executable,
         "--preview",
@@ -640,9 +731,26 @@ std::vector<std::string> preview_args(const char* executable, const Options& opt
     };
     if (ui) {
         args.emplace_back("--always-on-top");
+#if defined(_WIN32)
+        args.emplace_back("--opacity");
+        args.emplace_back("1.0");
+#else
         args.emplace_back("--transparent-clear");
         args.emplace_back("--opacity");
         args.emplace_back(std::to_string(options.ui_opacity));
+#endif
+    } else {
+        args.emplace_back("--udp-video");
+        args.emplace_back("--udp-port");
+        args.emplace_back(std::to_string(options.view_udp_port));
+        args.emplace_back("--secondary-udp-port");
+        args.emplace_back(std::to_string(static_cast<std::uint16_t>(options.view_udp_port + 1U)));
+        args.emplace_back("--udp-codec");
+        args.emplace_back(options.view_udp_codec);
+#if defined(_WIN32)
+        args.emplace_back("--ui-buffer-path");
+        args.emplace_back(options.ui_buffer_path);
+#endif
     }
     return args;
 }
@@ -655,7 +763,7 @@ std::vector<std::string> view_args(const char* executable, const Options& option
         "--ipc-socket",
         options.ipc_socket,
     };
-    if (options.kms_stack || options.preview_stack) {
+    if (options.kms_stack) {
         args.emplace_back("--udp-video");
         args.emplace_back("--udp-port");
         args.emplace_back(std::to_string(options.view_udp_port));
@@ -1222,6 +1330,8 @@ int run_kms_video_preview(const Options& options)
     };
 
     glide::flow::GlesTextRenderer flow_renderer;
+    const auto* configured_map_root = std::getenv("GLIDE_MINIMAP_TILE_ROOT");
+    glide::flow::GpuMapRenderer gpu_map_renderer(configured_map_root != nullptr ? configured_map_root : "assets/maps");
     glide::flow::AltitudeWidgetRenderer altitude_widget;
     glide::flow::SpeedWidgetRenderer speed_widget;
     glide::flow::LinkOverviewRenderer link_overview;
@@ -1247,6 +1357,7 @@ int run_kms_video_preview(const Options& options)
     ScopedThreadJoin async_flow_join { async_flow_thread };
     ScopedThreadJoin ui_buffer_join { ui_buffer_thread };
     RuntimeControlState control_state;
+    control_state.telemetry_connection = mavlink_bridge.connection_description();
     glide::mavlink::Snapshot mavlink_snapshot;
     std::mutex mavlink_snapshot_mutex;
     glide::ipc::Server ipc_server;
@@ -1350,6 +1461,11 @@ int run_kms_video_preview(const Options& options)
                     draw_connecting_indicator(flow_renderer, flow_surface, theme, std::chrono::steady_clock::now(), "WAITING FOR VIDEO");
                 }
             }
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(mavlink_snapshot_mutex);
+            gpu_map_renderer.draw(flow_renderer, flow_surface, control_state.gpu_map);
         }
 
         if (options.ui_overlay && shared_ui.open_if_needed(options.ui_buffer_path, options.ui_width, ui_height)) {
@@ -1473,6 +1589,7 @@ int run_kms_video_preview(const Options& options)
                                              &telemetry_signal_present,
                                              &mavlink_snapshot,
                                              &mavlink_snapshot_mutex,
+                                             &control_state,
                                              flow_frame_interval,
                                              flow_fps = options.flow_fps,
                                              flow_overlay = options.flow_overlay,
@@ -1511,6 +1628,8 @@ int run_kms_video_preview(const Options& options)
 
             {
                 glide::flow::GlesTextRenderer renderer;
+                const auto* configured_map_root = std::getenv("GLIDE_MINIMAP_TILE_ROOT");
+                glide::flow::GpuMapRenderer gpu_map(configured_map_root != nullptr ? configured_map_root : "assets/maps");
                 glide::flow::AltitudeWidgetRenderer altitude;
                 glide::flow::SpeedWidgetRenderer speed;
                 glide::flow::LinkOverviewRenderer links;
@@ -1595,6 +1714,11 @@ int run_kms_video_preview(const Options& options)
                                 draw_connecting_indicator(renderer, surface, theme, std::chrono::steady_clock::now(), "WAITING FOR VIDEO");
                             }
                         }
+                    }
+
+                    {
+                        std::lock_guard<std::mutex> lock(mavlink_snapshot_mutex);
+                        gpu_map.draw(renderer, surface, control_state.gpu_map);
                     }
 
                     if (ui_overlay && shared_ui.open_if_needed(ui_buffer_path, ui_width, ui_height)) {
@@ -2617,6 +2741,7 @@ int run_preview_stack(char* argv0, const Options& options)
     bool compact_readouts = false;
     bool top_bar_enabled = true;
     std::string osd_layout = glide::preview_control::osd_layout();
+    std::string telemetry_connection = mavlink_bridge.connection_description();
 
     while (stop_requested == 0) {
         broadcast_mavlink_updates(mavlink_bridge, ipc_server);
@@ -2629,6 +2754,7 @@ int run_preview_stack(char* argv0, const Options& options)
                 ipc_server.send_line(event.client_id, std::string("state compact ") + (compact_readouts ? "1" : "0"));
                 ipc_server.send_line(event.client_id, std::string("state topbar ") + (top_bar_enabled ? "1" : "0"));
                 ipc_server.send_line(event.client_id, "state osd " + osd_layout);
+                ipc_server.send_line(event.client_id, "state telemetry " + telemetry_connection);
                 send_theme_state(ipc_server, event.client_id);
                 send_network_state(ipc_server, event.client_id, network_discovery);
             } else if (event.line == "get fps") {
@@ -2643,6 +2769,7 @@ int run_preview_stack(char* argv0, const Options& options)
                 ipc_server.send_line(event.client_id, "state osd " + osd_layout);
             } else if (event.line == "get theme") {
                 send_theme_state(ipc_server, event.client_id);
+            } else if (handle_telemetry_connection_line(event.line, ipc_server, event.client_id, mavlink_bridge, telemetry_connection)) {
             } else if (handle_network_line(event.line, ipc_server, event.client_id, network_discovery)) {
             } else if (event.line == "set fps 0" || event.line == "set fps 1") {
                 fps_enabled = event.line.back() == '1';
@@ -2787,6 +2914,7 @@ int run_kms_stack(char* argv0, const Options& options)
     bool compact_readouts = false;
     bool top_bar_enabled = true;
     std::string osd_layout = glide::preview_control::osd_layout();
+    std::string telemetry_connection = mavlink_bridge.connection_description();
 
     while (stop_requested == 0) {
         broadcast_mavlink_updates(mavlink_bridge, ipc_server);
@@ -2799,6 +2927,7 @@ int run_kms_stack(char* argv0, const Options& options)
                 ipc_server.send_line(event.client_id, std::string("state compact ") + (compact_readouts ? "1" : "0"));
                 ipc_server.send_line(event.client_id, std::string("state topbar ") + (top_bar_enabled ? "1" : "0"));
                 ipc_server.send_line(event.client_id, "state osd " + osd_layout);
+                ipc_server.send_line(event.client_id, "state telemetry " + telemetry_connection);
                 send_theme_state(ipc_server, event.client_id);
                 send_network_state(ipc_server, event.client_id, network_discovery);
             } else if (event.line == "get fps") {
@@ -2813,6 +2942,7 @@ int run_kms_stack(char* argv0, const Options& options)
                 ipc_server.send_line(event.client_id, "state osd " + osd_layout);
             } else if (event.line == "get theme") {
                 send_theme_state(ipc_server, event.client_id);
+            } else if (handle_telemetry_connection_line(event.line, ipc_server, event.client_id, mavlink_bridge, telemetry_connection)) {
             } else if (handle_network_line(event.line, ipc_server, event.client_id, network_discovery)) {
             } else if (event.line == "set fps 0" || event.line == "set fps 1") {
                 fps_enabled = event.line.back() == '1';
@@ -2868,6 +2998,130 @@ int run_kms_stack(char* argv0, const Options& options)
     glide::log(glide::LogLevel::error, "OpenHD-Glide", "device DRM/KMS mode is disabled in this build");
     return 1;
 #endif
+}
+#elif defined(_WIN32)
+struct WindowsChild {
+    HANDLE process {};
+    HANDLE thread {};
+};
+
+std::string quote_windows_argument(const std::string& argument)
+{
+    if (argument.find_first_of(" \t\"") == std::string::npos) return argument;
+    std::string quoted { '"' };
+    std::size_t backslashes {};
+    for (const auto character : argument) {
+        if (character == '\\') {
+            ++backslashes;
+        } else if (character == '"') {
+            quoted.append(backslashes * 2U + 1U, '\\');
+            quoted.push_back('"');
+            backslashes = 0;
+        } else {
+            quoted.append(backslashes, '\\');
+            backslashes = 0;
+            quoted.push_back(character);
+        }
+    }
+    quoted.append(backslashes * 2U, '\\');
+    quoted.push_back('"');
+    return quoted;
+}
+
+WindowsChild launch_windows_child(const std::vector<std::string>& args)
+{
+    std::string command;
+    for (const auto& argument : args) {
+        if (!command.empty()) command.push_back(' ');
+        command += quote_windows_argument(argument);
+    }
+    STARTUPINFOA startup {};
+    startup.cb = sizeof(startup);
+    PROCESS_INFORMATION process {};
+    if (!CreateProcessA(nullptr, command.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &startup, &process)) {
+        return {};
+    }
+    return { process.hProcess, process.hThread };
+}
+
+void close_windows_child(WindowsChild& child, bool terminate)
+{
+    if (child.process != nullptr) {
+        if (terminate && WaitForSingleObject(child.process, 0) == WAIT_TIMEOUT) TerminateProcess(child.process, 0);
+        WaitForSingleObject(child.process, 2000);
+        CloseHandle(child.process);
+        child.process = nullptr;
+    }
+    if (child.thread != nullptr) {
+        CloseHandle(child.thread);
+        child.thread = nullptr;
+    }
+}
+
+int run_preview_stack(char* argv0, const Options& options)
+{
+#if defined(_WIN32)
+    const auto runtime_dir = executable_dir(argv0);
+    const auto plugin_dir = runtime_dir + "gstreamer-1.0";
+    const auto plugin_scanner = runtime_dir + "gst-plugin-scanner.exe";
+    SetEnvironmentVariableA("GST_PLUGIN_SYSTEM_PATH_1_0", plugin_dir.c_str());
+    SetEnvironmentVariableA("GST_PLUGIN_SCANNER_1_0", plugin_scanner.c_str());
+#endif
+    stop_requested = 0;
+    signal(SIGINT, request_stop);
+    signal(SIGTERM, request_stop);
+    glide::ipc::Server ipc_server;
+    if (!ipc_server.listen_on(options.ipc_socket)) {
+        glide::log(glide::LogLevel::error, "OpenHD-Glide", "failed to start IPC server: " + ipc_server.last_error());
+        return 1;
+    }
+    glide::mavlink::UdpBridge mavlink_bridge;
+    start_mavlink_bridge(mavlink_bridge, options);
+    glide::net::DiscoveryService network_discovery;
+    start_network_discovery(network_discovery, options);
+
+    auto view = launch_windows_child(view_args(sibling_executable(argv0, "glide-view").c_str(), options));
+    auto flow = launch_windows_child(preview_args(sibling_executable(argv0, "glide-flow").c_str(), options, false));
+    std::this_thread::sleep_for(std::chrono::milliseconds(250));
+    auto ui = launch_windows_child(preview_args(sibling_executable(argv0, "glide-ui").c_str(), options, true));
+    if (view.process == nullptr || flow.process == nullptr || ui.process == nullptr) {
+        close_windows_child(view, true);
+        close_windows_child(flow, true);
+        close_windows_child(ui, true);
+        glide::log(glide::LogLevel::error, "OpenHD-Glide", "failed to launch the Windows preview workers");
+        return 1;
+    }
+
+    glide::log(glide::LogLevel::info, "OpenHD-Glide", "Windows desktop stack ready; video, OSD, menu, and map share one SDL window");
+    RuntimeControlState control;
+    control.telemetry_connection = mavlink_bridge.connection_description();
+    glide::mavlink::Snapshot mavlink;
+    while (stop_requested == 0) {
+        poll_runtime_controls(ipc_server, mavlink_bridge, network_discovery, control, mavlink);
+        if (WaitForSingleObject(view.process, 0) != WAIT_TIMEOUT) {
+            glide::log(glide::LogLevel::error, "OpenHD-Glide", "glide-view exited; stopping Windows preview stack");
+            break;
+        }
+        if (WaitForSingleObject(flow.process, 0) != WAIT_TIMEOUT) {
+            glide::log(glide::LogLevel::error, "OpenHD-Glide", "glide-flow exited; stopping Windows preview stack");
+            break;
+        }
+        if (WaitForSingleObject(ui.process, 0) != WAIT_TIMEOUT) {
+            glide::log(glide::LogLevel::error, "OpenHD-Glide", "glide-ui exited; stopping Windows preview stack");
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+    close_windows_child(view, true);
+    close_windows_child(flow, true);
+    close_windows_child(ui, true);
+    return 0;
+}
+
+int run_kms_stack(char*, const Options&)
+{
+    glide::log(glide::LogLevel::error, "OpenHD-Glide", "--kms-stack is unavailable on Windows; use --preview-stack");
+    return 1;
 }
 #else
 int run_preview_stack(char*, const Options&)
