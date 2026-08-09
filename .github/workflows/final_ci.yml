@@ -72,7 +72,7 @@ jobs:
             cmake dpkg-dev file git make ninja-build pkg-config \
             libdrm-dev libgbm-dev libegl1-mesa-dev libgles2-mesa-dev \
             libfreetype6-dev libgstreamer1.0-dev \
-            libgstreamer-plugins-base1.0-dev zlib1g-dev
+            libgstreamer-plugins-base1.0-dev libunwind-dev zlib1g-dev
 
       - name: Install cross-build tools
         if: matrix.architecture != 'amd64'
