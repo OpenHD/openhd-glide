@@ -213,7 +213,9 @@ bool apply_ipc_line(Snapshot& snapshot, const std::string& line)
         stream >> target >> param;
         const auto value = rest_after(stream);
         const auto upper_param = upper_copy(param);
-        if (upper_param == "RESOLUTION_FPS" || upper_param == "VIDEO_FORMAT" || upper_param == "CAMERA_FORMAT") {
+        if (upper_param == "SIYI_ACTIVE") {
+            snapshot.siyi_active = parse_int_or(0, value) == 1;
+        } else if (upper_param == "RESOLUTION_FPS" || upper_param == "VIDEO_FORMAT" || upper_param == "CAMERA_FORMAT") {
             snapshot.resolution_fps = value;
         } else if (upper_param == "ROTATION_FLIP" || upper_param == "ROTATION_DEG" || upper_param == "VIDEO_ROTATION") {
             snapshot.rotation = value;

@@ -50,6 +50,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <initializer_list>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -1466,6 +1467,84 @@ lv_obj_t* action_button(UiState& state, const char* text)
     return button;
 }
 
+bool is_siyi_continuous_control(const std::string& control)
+{
+    return control == "UP" || control == "DOWN" || control == "LEFT" || control == "RIGHT"
+        || control == "ZOOM -" || control == "ZOOM +"
+        || control == "FOCUS -" || control == "FOCUS +";
+}
+
+void send_siyi_control(UiState& state, const std::string& control, bool release)
+{
+    std::string command;
+    if (release) {
+        if (control == "UP" || control == "DOWN" || control == "LEFT" || control == "RIGHT") {
+            command = "siyi-gimbal-stop";
+        } else if (control == "ZOOM -" || control == "ZOOM +") {
+            command = "siyi-zoom-stop";
+        } else if (control == "FOCUS -" || control == "FOCUS +") {
+            command = "siyi-focus-stop";
+        }
+    } else if (control == "UP") command = "siyi-gimbal-up";
+    else if (control == "DOWN") command = "siyi-gimbal-down";
+    else if (control == "LEFT") command = "siyi-gimbal-left";
+    else if (control == "RIGHT") command = "siyi-gimbal-right";
+    else if (control == "CENTER") command = "siyi-gimbal-center";
+    else if (control == "ZOOM -") command = "siyi-zoom-out";
+    else if (control == "ZOOM +") command = "siyi-zoom-in";
+    else if (control == "FOCUS -") command = "siyi-focus-near";
+    else if (control == "FOCUS +") command = "siyi-focus-far";
+    else if (control == "AF") command = "siyi-autofocus";
+    else if (control == "PHOTO") command = "siyi-photo";
+    else if (control == "REC") command = "siyi-record-start";
+    else if (control == "STOP REC") command = "siyi-record-stop";
+    if (!command.empty()) {
+        send_mavlink_action(state, glide::mavlink::format_action_command(command));
+    }
+}
+
+lv_obj_t* siyi_button(UiState& state, lv_obj_t* parent, const char* text)
+{
+    auto* button = lv_button_create(parent);
+    lv_obj_set_height(button, 40);
+    lv_obj_set_flex_grow(button, 1);
+    lv_obj_set_style_bg_color(button, color(0x1a2530), 0);
+    lv_obj_set_style_bg_color(button, color(0x332410), LV_STATE_PRESSED);
+    lv_obj_set_style_border_width(button, 1, 0);
+    lv_obj_set_style_border_color(button, color(0x5d6f7f), 0);
+    auto* button_label = label(button, text, &lv_font_montserrat_12, 0xffffff);
+    lv_obj_center(button_label);
+    lv_obj_add_event_cb(
+        button,
+        [](lv_event_t* event) {
+            auto* state = static_cast<UiState*>(lv_event_get_user_data(event));
+            auto* button = static_cast<lv_obj_t*>(lv_event_get_target(event));
+            const std::string control = lv_label_get_text(lv_obj_get_child(button, 0));
+            const auto code = lv_event_get_code(event);
+            if (is_siyi_continuous_control(control)) {
+                if (code == LV_EVENT_PRESSED) send_siyi_control(*state, control, false);
+                else if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) send_siyi_control(*state, control, true);
+            } else if (code == LV_EVENT_CLICKED) {
+                send_siyi_control(*state, control, false);
+            }
+        },
+        LV_EVENT_ALL,
+        &state);
+    return button;
+}
+
+void siyi_button_row(UiState& state, std::initializer_list<const char*> controls)
+{
+    auto* row = lv_obj_create(state.panel_body);
+    lv_obj_remove_style_all(row);
+    lv_obj_set_size(row, LV_PCT(100), 40);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_style_pad_column(row, 5, 0);
+    for (const auto* control : controls) {
+        siyi_button(state, row, control);
+    }
+}
+
 void setup_panel_column(lv_obj_t* body, int pad = 14)
 {
     lv_obj_set_flex_flow(body, LV_FLEX_FLOW_COLUMN);
@@ -2505,6 +2584,16 @@ void build_camera_panel(UiState& state)
         },
         LV_EVENT_CLICKED,
         &state);
+
+    if (state.mavlink.siyi_active) {
+        auto* title = label(state.panel_body, "SIYI controls", &lv_font_montserrat_18, 0xffffff);
+        lv_obj_set_width(title, LV_PCT(100));
+        siyi_button_row(state, { "UP", "CENTER", "DOWN" });
+        siyi_button_row(state, { "LEFT", "RIGHT" });
+        siyi_button_row(state, { "ZOOM -", "ZOOM +" });
+        siyi_button_row(state, { "FOCUS -", "AF", "FOCUS +" });
+        siyi_button_row(state, { "PHOTO", "REC", "STOP REC" });
+    }
 }
 
 void build_recording_panel(UiState& state)

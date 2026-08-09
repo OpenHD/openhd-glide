@@ -747,8 +747,49 @@ bool UdpBridge::send_command_long(const std::string& command, const std::string&
 {
     float params[7] {};
     std::uint16_t command_id {};
+    std::uint8_t target_component = air_component_id_;
     if (command == "scan") {
         command_id = 31000;
+    } else if (command == "siyi-gimbal-stop") {
+        command_id = 1000;
+        params[0] = std::numeric_limits<float>::quiet_NaN();
+        params[1] = std::numeric_limits<float>::quiet_NaN();
+        target_component = 100;
+    } else if (command == "siyi-gimbal-up" || command == "siyi-gimbal-down"
+               || command == "siyi-gimbal-left" || command == "siyi-gimbal-right") {
+        command_id = 1000;
+        params[0] = std::numeric_limits<float>::quiet_NaN();
+        params[1] = std::numeric_limits<float>::quiet_NaN();
+        params[2] = command == "siyi-gimbal-up" ? 45.0F : (command == "siyi-gimbal-down" ? -45.0F : 0.0F);
+        params[3] = command == "siyi-gimbal-right" ? 45.0F : (command == "siyi-gimbal-left" ? -45.0F : 0.0F);
+        target_component = 100;
+    } else if (command == "siyi-gimbal-center") {
+        command_id = 1000;
+        params[0] = std::numeric_limits<float>::quiet_NaN();
+        params[1] = std::numeric_limits<float>::quiet_NaN();
+        params[4] = 2.0F;
+        target_component = 100;
+    } else if (command == "siyi-zoom-in" || command == "siyi-zoom-out" || command == "siyi-zoom-stop") {
+        command_id = 531;
+        params[0] = 1.0F;
+        params[1] = command == "siyi-zoom-in" ? 1.0F : (command == "siyi-zoom-out" ? -1.0F : 0.0F);
+        target_component = 100;
+    } else if (command == "siyi-focus-near" || command == "siyi-focus-far" || command == "siyi-focus-stop") {
+        command_id = 532;
+        params[0] = 1.0F;
+        params[1] = command == "siyi-focus-far" ? 1.0F : (command == "siyi-focus-near" ? -1.0F : 0.0F);
+        target_component = 100;
+    } else if (command == "siyi-autofocus") {
+        command_id = 532;
+        params[0] = 5.0F;
+        target_component = 100;
+    } else if (command == "siyi-photo") {
+        command_id = 2000;
+        params[2] = 1.0F;
+        target_component = 100;
+    } else if (command == "siyi-record-start" || command == "siyi-record-stop") {
+        command_id = command == "siyi-record-start" ? 2500 : 2501;
+        target_component = 100;
     } else {
         return false;
     }
@@ -758,7 +799,7 @@ bool UdpBridge::send_command_long(const std::string& command, const std::string&
     }
     put_le<std::uint16_t>(payload, command_id);
     put_u8(payload, air_system_id_);
-    put_u8(payload, air_component_id_);
+    put_u8(payload, target_component);
     put_u8(payload, 0);
     return send_packet(76, 152, payload);
 }
