@@ -69,6 +69,17 @@ MppFrame as_frame(void* frame)
 constexpr std::uint8_t start_code[] { 0x00, 0x00, 0x00, 0x01 };
 constexpr std::uint8_t x20_sps[] { 0x67, 0x4d, 0x00, 0x29, 0x96, 0x54, 0x02, 0x80, 0x2d, 0x88 };
 constexpr std::uint8_t x20_pps[] { 0x68, 0xee, 0x31, 0x12 };
+
+bool is_x21_rv1126_mpp_sps(const std::uint8_t* data, std::size_t size)
+{
+    // H.264 SPS: nal type 7, High profile (0x64), level 4.2 (0x2a).
+    // This is deliberately narrower than accepting every High@L4.2 encoder:
+    // a recovery seed must only be injected for the cyclic-intra MPP stream.
+    return size >= 4
+        && (data[0] & 0x1FU) == 7U
+        && data[1] == 0x64U
+        && data[3] == 0x2aU;
+}
 constexpr std::array<std::uint8_t, 64> jpeg_luma_quantizer {
     16, 11, 10, 16, 24, 40, 51, 61,
     12, 12, 14, 19, 26, 58, 60, 55,
@@ -832,13 +843,16 @@ bool RockchipMppRtpDecoder::flush_access_unit()
 bool RockchipMppRtpDecoder::update_x20_detection(const std::uint8_t* data, std::size_t size)
 {
     if (x20_header_injected_ || x20_checked_non_x20_ || data == nullptr || size == 0) {
-        return x20_sps_seen_ && x20_pps_seen_ && !x20_header_injected_;
+        return (x20_sps_seen_ && x20_pps_seen_ && !x20_header_injected_)
+            || (x21_mpp_sps_seen_ && !x20_header_injected_);
     }
 
     const auto nal_type = data[0] & 0x1FU;
     if (nal_type == 7) {
         if (size == std::size(x20_sps) && std::equal(std::begin(x20_sps), std::end(x20_sps), data)) {
             x20_sps_seen_ = true;
+        } else if (is_x21_rv1126_mpp_sps(data, size)) {
+            x21_mpp_sps_seen_ = true;
         } else {
             x20_checked_non_x20_ = true;
         }
@@ -849,7 +863,8 @@ bool RockchipMppRtpDecoder::update_x20_detection(const std::uint8_t* data, std::
             x20_checked_non_x20_ = true;
         }
     }
-    return x20_sps_seen_ && x20_pps_seen_ && !x20_header_injected_;
+    return (x20_sps_seen_ && x20_pps_seen_ && !x20_header_injected_)
+        || (x21_mpp_sps_seen_ && !x20_header_injected_);
 }
 
 bool RockchipMppRtpDecoder::inject_x20_header_if_needed()
@@ -859,12 +874,21 @@ bool RockchipMppRtpDecoder::inject_x20_header_if_needed()
     }
 
     std::vector<std::string> paths;
-    if (const auto* override_path = std::getenv("OPENHD_GLIDE_X20_HEADER"); override_path != nullptr && override_path[0] != '\0') {
-        paths.emplace_back(override_path);
+    if (x21_mpp_sps_seen_) {
+        if (const auto* override_path = std::getenv("OPENHD_GLIDE_X21_HEADER"); override_path != nullptr && override_path[0] != '\0') {
+            paths.emplace_back(override_path);
+        }
+        paths.emplace_back("/usr/share/openhd-glide/x21_header.h264");
+        paths.emplace_back("/usr/local/share/openhd-glide/x21_header.h264");
+        paths.emplace_back("/usr/local/bin/x21_header.h264");
+    } else {
+        if (const auto* override_path = std::getenv("OPENHD_GLIDE_X20_HEADER"); override_path != nullptr && override_path[0] != '\0') {
+            paths.emplace_back(override_path);
+        }
+        paths.emplace_back("/usr/share/openhd-glide/x20_header.h264");
+        paths.emplace_back("/usr/local/share/openhd-glide/x20_header.h264");
+        paths.emplace_back("/usr/local/bin/x20_header.h264");
     }
-    paths.emplace_back("/usr/share/openhd-glide/x20_header.h264");
-    paths.emplace_back("/usr/local/share/openhd-glide/x20_header.h264");
-    paths.emplace_back("/usr/local/bin/x20_header.h264");
 
     for (const auto& path : paths) {
         std::ifstream input(path, std::ios::binary);

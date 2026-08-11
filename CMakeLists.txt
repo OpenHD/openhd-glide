@@ -553,6 +553,7 @@ install(
 install(
     FILES
         packaging/assets/x20_header.h264
+        packaging/assets/x21_header.h264
     DESTINATION share/openhd-glide
 )
 

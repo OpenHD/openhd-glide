@@ -117,6 +117,10 @@ private:
     std::uint32_t current_timestamp_ {};
     bool x20_sps_seen_ {};
     bool x20_pps_seen_ {};
+    // RV1126(B)/X21 MPP produces High Profile, level 4.2 H.264.  Its cyclic
+    // intra-refresh stream may not contain an IDR after a receiver joins, so
+    // it needs the same decoder-side recovery seed as the X20 stream.
+    bool x21_mpp_sps_seen_ {};
     bool x20_checked_non_x20_ {};
     bool x20_header_injected_ {};
     bool x20_header_missing_ {};
