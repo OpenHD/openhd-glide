@@ -26,6 +26,7 @@
 #include "common/mavlink_udp_bridge.hpp"
 #include "common/mavlink_state.hpp"
 #include "common/preview_control.hpp"
+#include "common/settings/json.hpp"
 #include "glide_ui/minimap_widget.hpp"
 
 #if OPENHD_GLIDE_HAS_LVGL
@@ -205,6 +206,10 @@ struct UiState {
     glide::ipc::Client ipc;
     std::string ipc_socket { glide::ipc::default_socket_path };
     glide::mavlink::Snapshot mavlink;
+    nlohmann::json device_settings = nlohmann::json::object();
+    nlohmann::json device_values = nlohmann::json::object();
+    std::string settings_status;
+    std::map<int,lv_obj_t*> settings_controls;
     bool fps_enabled { true };
     bool coordinates_enabled { true };
     bool coordinates_before_map { true };
@@ -1378,15 +1383,7 @@ void send_artosyn_action(UiState& state, const std::string& param)
     send_openhd_param(state, "air", param, "1");
 }
 
-std::string next_resolution_fps_value(const std::string& current)
-{
-    for (std::size_t i = 0; i < openhd_resolution_fps_presets.size(); ++i) {
-        if (current.find(openhd_resolution_fps_presets[i]) != std::string::npos) {
-            return openhd_resolution_fps_presets[(i + 1U) % openhd_resolution_fps_presets.size()];
-        }
-    }
-    return openhd_resolution_fps_presets.front();
-}
+
 
 int next_value_in_cycle(int current, const int* values, std::size_t count)
 {
@@ -1401,31 +1398,13 @@ int next_value_in_cycle(int current, const int* values, std::size_t count)
     return values[0];
 }
 
-int next_rotation_value(const std::string& current)
-{
-    int parsed {};
-    try {
-        parsed = std::stoi(current);
-    } catch (...) {
-        parsed = 0;
-    }
-    return next_value_in_cycle(parsed, rotation_presets.data(), rotation_presets.size());
-}
 
-int next_channel_width_value(int current)
-{
-    return current >= 40 ? 20 : 40;
-}
 
-int next_mcs_value(int current)
-{
-    return current >= 4 ? 0 : std::max(0, current + 1);
-}
 
-int next_tx_power_value(int current)
-{
-    return next_value_in_cycle(current, tx_power_presets_mw.data(), tx_power_presets_mw.size());
-}
+
+
+
+
 
 lv_obj_t* value_row(UiState& state, const char* title, const std::string& value, std::uint32_t value_color = 0xffffff)
 {
@@ -1620,6 +1599,7 @@ void invalidate_ui_handles(UiState& state)
         nav_button = nullptr;
     }
     state.row_count = 0;
+    state.settings_controls.clear();
 }
 
 void rebuild_ui(UiState& state)
@@ -1805,6 +1785,14 @@ void apply_terminal_key(UiState& state, const std::string& line)
             state.focus_panel = true;
             state.selected_row = 0;
             rebuild_ui(state);
+        } else if (state.settings_controls.count(state.selected_row)) {
+            auto* control=state.settings_controls.at(state.selected_row);
+            if (lv_obj_check_type(control,&lv_dropdown_class)) {
+                const auto n=lv_dropdown_get_option_count(control);
+                if(n) lv_dropdown_set_selected(control,(lv_dropdown_get_selected(control)+1)%n);
+            } else if (lv_obj_check_type(control,&lv_textarea_class)) {
+                lv_obj_send_event(control,LV_EVENT_FOCUSED,nullptr);
+            } else lv_obj_send_event(control,LV_EVENT_CLICKED,nullptr);
         } else if (state.active_panel == SidebarPanel::dashboard && state.selected_row == 4) {
             if (state.mavlink.air_chipset.find("ARTOSYN") != std::string::npos
                 || state.mavlink.ground_chipset.find("ARTOSYN") != std::string::npos) {
@@ -1816,16 +1804,6 @@ void apply_terminal_key(UiState& state, const std::string& line)
                    && (state.mavlink.air_chipset.find("ARTOSYN") != std::string::npos
                        || state.mavlink.ground_chipset.find("ARTOSYN") != std::string::npos)) {
             send_artosyn_action(state, "AR_PAIR_CMD");
-        } else if (state.active_panel == SidebarPanel::link && state.selected_row == 4) {
-            send_openhd_param(state, "air", "WB_CHANNEL_W", std::to_string(next_channel_width_value(state.mavlink.channel_width_mhz)));
-        } else if (state.active_panel == SidebarPanel::link && state.selected_row == 5) {
-            send_openhd_param(state, "air", "WB_MCS_INDEX", std::to_string(next_mcs_value(state.mavlink.mcs_index)));
-        } else if (state.active_panel == SidebarPanel::link && state.selected_row == 6) {
-            send_openhd_param(state, "air", "TX_POWER_MW", std::to_string(next_tx_power_value(state.mavlink.tx_power_mw)));
-        } else if (state.active_panel == SidebarPanel::link && state.selected_row == 7) {
-            send_openhd_param(state, "air", "WB_PIT_MODE", "1");
-        } else if (state.active_panel == SidebarPanel::link && state.selected_row == 8) {
-            send_openhd_param(state, "air", "WB_PIT_MODE", "0");
         } else if (state.active_panel == SidebarPanel::video && state.selected_row == 0) {
             const auto next = static_cast<std::uint16_t>((resolution_index_for_state(state) + 1U) % resolution_presets.size());
             set_resolution_preset(state, next, true);
@@ -1882,20 +1860,6 @@ void apply_terminal_key(UiState& state, const std::string& line)
             theme_color_ref(state, index) = rgb;
             send_theme_color(state, index);
             sync_theme_controls(state);
-        } else if (state.active_panel == SidebarPanel::camera && state.selected_row == 3) {
-            send_openhd_param(state, "camera1", "RESOLUTION_FPS", next_resolution_fps_value(state.mavlink.resolution_fps));
-        } else if (state.active_panel == SidebarPanel::camera && state.selected_row == 4) {
-            send_openhd_param(state, "camera1", "ROTATION_DEG", std::to_string(next_rotation_value(state.mavlink.rotation)));
-        } else if (state.active_panel == SidebarPanel::camera && state.selected_row == 5) {
-            send_openhd_param(state, "camera1", "INTRA_REFRESH", "0");
-        } else if (state.active_panel == SidebarPanel::camera && state.selected_row == 6) {
-            send_openhd_param(state, "camera1", "INTRA_REFRESH", "1");
-        } else if (state.active_panel == SidebarPanel::recording && state.selected_row == 2) {
-            send_openhd_param(state, "camera1", "AIR_RECORDING_E", "0");
-        } else if (state.active_panel == SidebarPanel::recording && state.selected_row == 3) {
-            send_openhd_param(state, "camera1", "AIR_RECORDING_E", "1");
-        } else if (state.active_panel == SidebarPanel::recording && state.selected_row == 4) {
-            send_openhd_param(state, "camera1", "AIR_RECORDING_E", "2");
         } else if (state.active_panel == SidebarPanel::developer && state.selected_row == 5) {
             state.advanced_visible = !state.advanced_visible;
             rebuild_ui(state);
@@ -2301,6 +2265,86 @@ void build_colors_panel(UiState& state)
     sync_theme_controls(state);
 }
 
+bool apply_settings_line(UiState& state,const std::string& line)
+{
+    std::istringstream stream(line); std::string prefix,kind; int sys{},comp{};
+    stream >> prefix >> kind >> sys >> comp;
+    if (prefix!="mav" || (kind!="setting" && kind!="setting-value" && kind!="setting-result" && kind!="settings-clear")) return false;
+    const auto target=std::to_string(sys)+"/"+std::to_string(comp);
+    if (kind=="settings-clear") { state.device_settings.erase(target); state.device_values.erase(target); return true; }
+    std::string payload; std::getline(stream,payload);
+    const auto entry=nlohmann::json::parse(payload,nullptr,false);
+    if (!entry.is_object() || !entry.contains("id") || !entry["id"].is_string()) return true;
+    const auto id=entry["id"].get<std::string>();
+    if (kind=="setting") state.device_settings[target][id]=entry;
+    else if (kind=="setting-value" && entry.contains("value")) state.device_values[target][id]=entry["value"];
+    else if (kind=="setting-result") {
+        const int result=entry.value("result",2);
+        state.settings_status=id+(result==0 ? ": accepted" : result==3 ? ": applying" : ": rejected");
+    }
+    return true;
+}
+
+void build_device_settings(UiState& state,const std::string& only_target="",const std::string& only_id="")
+{
+    if (!state.settings_status.empty()) value_row(state,"Last setting",state.settings_status);
+    for (auto target=state.device_settings.begin();target!=state.device_settings.end();++target) {
+        if (!only_target.empty() && target.key()!=only_target) continue;
+        const auto values=state.device_values.find(target.key());
+        if (values==state.device_values.end()) continue;
+        for (auto item=target.value().begin();item!=target.value().end();++item) {
+            if (!only_id.empty() && item.key()!=only_id) continue;
+            const auto value=values->find(item.key());
+            if (value==values->end()) continue; // Only actually enumerated parameters.
+            const auto& entry=item.value();
+            if (!entry.value("available",true)) continue;
+            const auto name=entry.value("label",item.key())+" ("+target.key()+")";
+            const auto text=value->is_string() ? value->get<std::string>() : value->dump();
+            value_row(state,name.c_str(),text);
+            if (entry.value("readOnly",false) || !entry.value("writable",true)) continue;
+            const auto type=entry.value("type","");
+            if (type!="int32" && type!="string") continue;
+            const bool choices=entry.contains("choices") && entry["choices"].is_array() && !entry["choices"].empty();
+            lv_obj_t* input;
+            if (choices) {
+                input=lv_dropdown_create(state.panel_body); std::string options; unsigned selected=0,index=0;
+                for (const auto& c:entry["choices"]) {
+                    if (!options.empty()) options+='\n';
+                    options+=c.value("label",c.at("value").dump());
+                    if (c.at("value")==*value) selected=index;
+                    ++index;
+                }
+                lv_dropdown_set_options(input,options.c_str()); lv_dropdown_set_selected(input,selected);
+            } else {
+                input=lv_textarea_create(state.panel_body);
+                lv_textarea_set_one_line(input,true); lv_textarea_set_text(input,text.c_str());
+                lv_textarea_set_max_length(input,type=="string" ? 128 : 11);
+                if (type=="int32") lv_textarea_set_accepted_chars(input,"-0123456789");
+            }
+            lv_obj_set_width(input,LV_PCT(100));
+            state.settings_controls[state.row_count++]=input;
+            struct Binding { UiState* state; lv_obj_t* input; nlohmann::json entry; std::string target; bool choices; };
+            auto* binding=new Binding{&state,input,entry,target.key(),choices};
+            const auto apply_row=state.row_count;
+            auto* apply=action_button(state,"APPLY SETTING");
+            state.settings_controls[apply_row]=apply;
+            lv_obj_add_event_cb(apply,[](lv_event_t* event){
+                auto* b=static_cast<Binding*>(lv_event_get_user_data(event));
+                nlohmann::json value;
+                if (b->choices) value=b->entry["choices"].at(lv_dropdown_get_selected(b->input)).at("value");
+                else if (b->entry.at("type")=="int32") value=nlohmann::json::parse(lv_textarea_get_text(b->input),nullptr,false);
+                else value=std::string(lv_textarea_get_text(b->input));
+                if (value.is_discarded()) { b->state->settings_status="Invalid value"; return; }
+                const auto slash=b->target.find('/');
+                b->state->ipc.send_line("mav set-typed "+b->target.substr(0,slash)+" "+b->target.substr(slash+1)+" "+
+                    b->entry.at("type").get<std::string>()+" "+b->entry.at("id").get<std::string>()+" "+value.dump());
+                b->state->settings_status="Waiting for OpenHD acknowledgement";
+            },LV_EVENT_CLICKED,binding);
+            lv_obj_add_event_cb(apply,[](lv_event_t* event){delete static_cast<Binding*>(lv_event_get_user_data(event));},LV_EVENT_DELETE,binding);
+        }
+    }
+}
+
 void build_system_panel(UiState& state)
 {
     setup_panel_column(state.panel_body);
@@ -2308,6 +2352,7 @@ void build_system_panel(UiState& state)
     value_row(state, "Ground WiFi Mode", state.mavlink.ground_wifi_mode);
     value_row(state, "Air Hotspot", state.mavlink.air_hotspot);
     value_row(state, "Ground Hotspot", state.mavlink.ground_hotspot);
+    build_device_settings(state);
 }
 
 void build_link_panel(UiState& state)
@@ -2388,51 +2433,8 @@ void build_link_panel(UiState& state)
             &state);
         return;
     }
-    auto* width = action_button(state, "CYCLE CHANNEL WIDTH");
-    lv_obj_add_event_cb(
-        width,
-        [](lv_event_t* event) {
-            auto* state = static_cast<UiState*>(lv_event_get_user_data(event));
-            send_openhd_param(*state, "air", "WB_CHANNEL_W", std::to_string(next_channel_width_value(state->mavlink.channel_width_mhz)));
-        },
-        LV_EVENT_CLICKED,
-        &state);
-    auto* mcs = action_button(state, "CYCLE AIR MCS");
-    lv_obj_add_event_cb(
-        mcs,
-        [](lv_event_t* event) {
-            auto* state = static_cast<UiState*>(lv_event_get_user_data(event));
-            send_openhd_param(*state, "air", "WB_MCS_INDEX", std::to_string(next_mcs_value(state->mavlink.mcs_index)));
-        },
-        LV_EVENT_CLICKED,
-        &state);
-    auto* power = action_button(state, "CYCLE TX POWER");
-    lv_obj_add_event_cb(
-        power,
-        [](lv_event_t* event) {
-            auto* state = static_cast<UiState*>(lv_event_get_user_data(event));
-            send_openhd_param(*state, "air", "TX_POWER_MW", std::to_string(next_tx_power_value(state->mavlink.tx_power_mw)));
-        },
-        LV_EVENT_CLICKED,
-        &state);
-    auto* pit_on = action_button(state, "PIT MODE ON");
-    lv_obj_add_event_cb(
-        pit_on,
-        [](lv_event_t* event) {
-            auto* state = static_cast<UiState*>(lv_event_get_user_data(event));
-            send_openhd_param(*state, "air", "WB_PIT_MODE", "1");
-        },
-        LV_EVENT_CLICKED,
-        &state);
-    auto* pit_off = action_button(state, "PIT MODE OFF");
-    lv_obj_add_event_cb(
-        pit_off,
-        [](lv_event_t* event) {
-            auto* state = static_cast<UiState*>(lv_event_get_user_data(event));
-            send_openhd_param(*state, "air", "WB_PIT_MODE", "0");
-        },
-        LV_EVENT_CLICKED,
-        &state);
+    build_device_settings(state,"101/191");
+    build_device_settings(state,"100/191");
 }
 
 void video_slider_changed(lv_event_t* event)
@@ -2545,45 +2547,8 @@ void build_camera_panel(UiState& state)
     value_row(state, "Resolution/FPS", state.mavlink.resolution_fps);
     value_row(state, "Rotation", state.mavlink.rotation);
 
-    auto* resolution = action_button(state, "CYCLE AIR RESOLUTION/FPS");
-    lv_obj_add_event_cb(
-        resolution,
-        [](lv_event_t* event) {
-            auto* state = static_cast<UiState*>(lv_event_get_user_data(event));
-            send_openhd_param(*state, "camera1", "RESOLUTION_FPS", next_resolution_fps_value(state->mavlink.resolution_fps));
-        },
-        LV_EVENT_CLICKED,
-        &state);
-
-    auto* rotation = action_button(state, "CYCLE CAMERA ROTATION");
-    lv_obj_add_event_cb(
-        rotation,
-        [](lv_event_t* event) {
-            auto* state = static_cast<UiState*>(lv_event_get_user_data(event));
-            send_openhd_param(*state, "camera1", "ROTATION_DEG", std::to_string(next_rotation_value(state->mavlink.rotation)));
-        },
-        LV_EVENT_CLICKED,
-        &state);
-
-    auto* intra_off = action_button(state, "INTRA REFRESH OFF");
-    lv_obj_add_event_cb(
-        intra_off,
-        [](lv_event_t* event) {
-            auto* state = static_cast<UiState*>(lv_event_get_user_data(event));
-            send_openhd_param(*state, "camera1", "INTRA_REFRESH", "0");
-        },
-        LV_EVENT_CLICKED,
-        &state);
-
-    auto* intra_cyclic = action_button(state, "INTRA REFRESH CYCLIC");
-    lv_obj_add_event_cb(
-        intra_cyclic,
-        [](lv_event_t* event) {
-            auto* state = static_cast<UiState*>(lv_event_get_user_data(event));
-            send_openhd_param(*state, "camera1", "INTRA_REFRESH", "1");
-        },
-        LV_EVENT_CLICKED,
-        &state);
+    build_device_settings(state,"101/100");
+    build_device_settings(state,"101/101");
 
     if (state.mavlink.siyi_active) {
         auto* title = label(state.panel_body, "SIYI controls", &lv_font_montserrat_18, 0xffffff);
@@ -2601,33 +2566,8 @@ void build_recording_panel(UiState& state)
     setup_panel_column(state.panel_body);
     value_row(state, "Recording", state.mavlink.recording);
     value_row(state, "Status", state.mavlink.recording_status);
-    auto* off = action_button(state, "AIR RECORDING OFF");
-    lv_obj_add_event_cb(
-        off,
-        [](lv_event_t* event) {
-            auto* state = static_cast<UiState*>(lv_event_get_user_data(event));
-            send_openhd_param(*state, "camera1", "AIR_RECORDING_E", "0");
-        },
-        LV_EVENT_CLICKED,
-        &state);
-    auto* on = action_button(state, "AIR RECORDING ON");
-    lv_obj_add_event_cb(
-        on,
-        [](lv_event_t* event) {
-            auto* state = static_cast<UiState*>(lv_event_get_user_data(event));
-            send_openhd_param(*state, "camera1", "AIR_RECORDING_E", "1");
-        },
-        LV_EVENT_CLICKED,
-        &state);
-    auto* auto_arm = action_button(state, "RECORD ON ARMING");
-    lv_obj_add_event_cb(
-        auto_arm,
-        [](lv_event_t* event) {
-            auto* state = static_cast<UiState*>(lv_event_get_user_data(event));
-            send_openhd_param(*state, "camera1", "AIR_RECORDING_E", "2");
-        },
-        LV_EVENT_CLICKED,
-        &state);
+    build_device_settings(state,"101/100","AIR_RECORDING_E");
+    build_device_settings(state,"101/101","AIR_RECORDING_E");
 }
 
 void build_rc_panel(UiState& state)
@@ -2788,6 +2728,7 @@ void clear_panel(UiState& state)
     state.scan_bar = nullptr;
     state.scan_percent = nullptr;
     state.row_count = 0;
+    state.settings_controls.clear();
     state.selected_row = std::max(0, state.selected_row);
 }
 
@@ -3441,6 +3382,8 @@ void poll_ipc(UiState& state, std::chrono::steady_clock::time_point now)
             if (state.overlay_mode == OverlayMode::menu && panel_uses_network(state.active_panel)) {
                 request_panel_rebuild(state, now);
             }
+        } else if (apply_settings_line(state,line)) {
+            if (state.overlay_mode==OverlayMode::menu) request_panel_rebuild(state,now);
         } else if (glide::mavlink::apply_ipc_line(state.mavlink, line)) {
             if (state.overlay_mode == OverlayMode::menu && panel_uses_mavlink(state.active_panel)) {
                 request_panel_rebuild(state, now);

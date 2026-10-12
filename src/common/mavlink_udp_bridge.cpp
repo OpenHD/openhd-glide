@@ -23,6 +23,7 @@
 
 #include "common/mavlink_udp_bridge.hpp"
 #include "common/openhd_protocol.hpp"
+#include "common/settings/json.hpp"
 
 #include <algorithm>
 #include <array>
@@ -399,6 +400,18 @@ std::vector<Frame> parse_datagram(const std::uint8_t* data, std::size_t size)
             frame.msgid = data[i + 5U];
             frame.payload.assign(data + i + 6U, data + i + 6U + payload_len);
         }
+        std::optional<uint8_t> extra;
+        if (frame.msgid==0) extra=50;
+        else if (frame.msgid==110) extra=84;
+        else if (frame.msgid==322) extra=243;
+        else if (frame.msgid==324) extra=132;
+        if (extra) {
+            uint16_t crc=0xffff;
+            for (size_t j=1;j<header_len+payload_len;++j) crc=crc_accumulate(data[i+j],crc);
+            crc=crc_accumulate(*extra,crc);
+            const auto received_crc=uint16_t(data[i+header_len+payload_len]) | (uint16_t(data[i+header_len+payload_len+1])<<8);
+            if (crc!=received_crc) { i+=frame_len; continue; }
+        }
         frames.push_back(std::move(frame));
         i += frame_len;
     }
@@ -639,7 +652,50 @@ std::vector<std::string> UdpBridge::poll()
             break;
         }
         for (const auto& frame : frames) {
+            if (frame.msgid==110 && read_le<uint8_t>(frame.payload,1)==options_.system_id &&
+                read_le<uint8_t>(frame.payload,2)==options_.component_id) {
+                auto it=settings_downloads_.find({frame.sysid,frame.compid});
+                if (it!=settings_downloads_.end()) {
+                    ::openhd::settings::FtpPayload payload{};
+                    if (frame.payload.size()>3) std::copy_n(frame.payload.begin()+3,std::min<size_t>(251,frame.payload.size()-3),payload.begin());
+                    it->second.client.handle(payload);
+                }
+            }
+            if (frame.msgid==322) {
+                const auto name=c_string(frame.payload,4,16);
+                const auto type=read_le<uint8_t>(frame.payload,148);
+                nlohmann::json value;
+                if (type==6) value=read_le<int32_t>(frame.payload,20);
+                else if (type==11) value=c_string(frame.payload,20,128);
+                if (!name.empty() && !value.is_null()) lines.push_back("mav setting-value "+std::to_string(frame.sysid)+" "+
+                    std::to_string(frame.compid)+" "+nlohmann::json{{"id",name},{"value",value}}.dump());
+            }
+            if (frame.msgid==324) {
+                const auto id=c_string(frame.payload,0,16);
+                const auto result=read_le<uint8_t>(frame.payload,145);
+                lines.push_back("mav setting-result "+std::to_string(frame.sysid)+" "+std::to_string(frame.compid)+" "+
+                    nlohmann::json{{"id",id},{"result",result}}.dump());
+                if (result==0) {
+                    auto& download=settings_downloads_[{frame.sysid,frame.compid}];
+                    download.refreshed=std::chrono::steady_clock::now();
+                    download.client.start("/openhd/settings.json");
+                    lines.push_back("mav settings-clear "+std::to_string(frame.sysid)+" "+std::to_string(frame.compid));
+                    send_packet(321,88,{frame.sysid,frame.compid});
+                }
+            }
             if (frame.msgid == 0) {
+                if (frame.sysid==openhd::system_id_air || frame.sysid==openhd::system_id_ground) {
+                    const std::vector<uint8_t> components=frame.sysid==openhd::system_id_air ? std::vector<uint8_t>{191,100,101} : std::vector<uint8_t>{191};
+                    for (const auto comp:components) {
+                        auto& download=settings_downloads_[{frame.sysid,comp}];
+                        if (!download.client.active && std::chrono::steady_clock::now()-download.refreshed>std::chrono::seconds(30)) {
+                            download.refreshed=std::chrono::steady_clock::now();
+                            download.client.start("/openhd/settings.json");
+                            lines.push_back("mav settings-clear "+std::to_string(frame.sysid)+" "+std::to_string(comp));
+                            send_packet(321,88,{frame.sysid,comp});
+                        }
+                    }
+                }
                 const auto type = read_le<std::uint8_t>(frame.payload, 4);
                 const auto autopilot = read_le<std::uint8_t>(frame.payload, 5);
                 if (frame.sysid == openhd::system_id_ground) {
@@ -668,6 +724,22 @@ std::vector<std::string> UdpBridge::poll()
             }
         }
     }
+    for (auto& [target,download]:settings_downloads_) {
+        if (const auto request=download.client.poll()) {
+            std::vector<uint8_t> payload{0,target.first,target.second};
+            payload.insert(payload.end(),request->begin(),request->end());
+            send_packet(110,84,payload);
+        }
+        if (!download.client.active && download.client.success) {
+            const auto registry=nlohmann::json::parse(download.client.content,nullptr,false);
+            if (registry.is_object() && registry.value("version",0)==1 && registry.value("systemId",0)==target.first &&
+                registry.value("componentId",0)==target.second && registry.contains("settings") && registry["settings"].is_array()) {
+                for (const auto& entry:registry["settings"]) if (entry.is_object() && entry.contains("id"))
+                    lines.push_back("mav setting "+std::to_string(target.first)+" "+std::to_string(target.second)+" "+entry.dump());
+            }
+            download.client.success=false;
+        }
+    }
 #endif
     return lines;
 }
@@ -680,6 +752,24 @@ bool UdpBridge::handle_action_line(const std::string& line)
     stream >> prefix >> action;
     if (prefix != "mav") {
         return false;
+    }
+    if (action=="set-typed") {
+        int sys{},comp{}; std::string type,name,value;
+        stream >> sys >> comp >> type >> name;
+        std::getline(stream,value);
+        const auto parsed=nlohmann::json::parse(value,nullptr,false);
+        if ((sys!=100 && sys!=101) || (comp!=100 && comp!=101 && comp!=191) || name.empty() || name.size()>16) return false;
+        std::vector<uint8_t> payload{uint8_t(sys),uint8_t(comp)};
+        put_fixed_string(payload,name,16);
+        if (type=="int32" && parsed.is_number_integer()) {
+            if (parsed.is_number_unsigned() && parsed.get<uint64_t>()>uint64_t(INT32_MAX)) return false;
+            const auto n=parsed.get<int64_t>(); if (n<INT32_MIN || n>INT32_MAX) return false;
+            put_le<int32_t>(payload,int32_t(n)); payload.insert(payload.end(),124,0); payload.push_back(6);
+        } else if (type=="string" && parsed.is_string()) {
+            const auto text=parsed.get<std::string>(); if (text.size()>128 || text.find('\0')!=std::string::npos) return false;
+            put_fixed_string(payload,text,128); payload.push_back(11);
+        } else return false;
+        return send_packet(323,78,payload);
     }
     if (action == "set") {
         std::string target;

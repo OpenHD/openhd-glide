@@ -26,6 +26,8 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+#include <map>
+#include "common/settings/metadata_ftp.h"
 
 namespace glide::mavlink {
 
@@ -34,7 +36,7 @@ inline constexpr std::uint16_t openhd_ground_tcp_port = 5760;
 struct UdpBridgeOptions {
     std::uint16_t listen_port { 14550 };
     std::uint8_t system_id { 255 };
-    std::uint8_t component_id { 190 };
+    std::uint8_t component_id { 188 }; // Distinct from QOpenHD (190) and WebUI (189).
 };
 
 enum class NetworkTransport {
@@ -83,6 +85,11 @@ private:
 
     struct PeerStorage;
     PeerStorage* peer_ {};
+    struct SettingsDownload {
+        ::openhd::settings::MetadataFtpClient client;
+        std::chrono::steady_clock::time_point refreshed{};
+    };
+    std::map<std::pair<uint8_t,uint8_t>,SettingsDownload> settings_downloads_;
 };
 
 } // namespace glide::mavlink
