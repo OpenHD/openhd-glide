@@ -65,7 +65,7 @@ private:
     bool send_param_set(const std::string& target, const std::string& name, const std::string& value);
     bool send_param_ext_set(const std::string& target, const std::string& name, const std::string& value);
     bool send_command_long(const std::string& command, const std::string& arguments);
-    bool send_packet(std::uint32_t message_id, std::uint8_t crc_extra, const std::vector<std::uint8_t>& payload);
+    bool send_packet(std::uint32_t message_id, const std::vector<std::uint8_t>& payload);
 
     std::intptr_t fd_ { -1 };
     UdpBridgeOptions options_ {};

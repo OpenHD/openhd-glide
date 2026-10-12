@@ -400,11 +400,7 @@ std::vector<Frame> parse_datagram(const std::uint8_t* data, std::size_t size)
             frame.msgid = data[i + 5U];
             frame.payload.assign(data + i + 6U, data + i + 6U + payload_len);
         }
-        std::optional<uint8_t> extra;
-        if (frame.msgid==0) extra=50;
-        else if (frame.msgid==110) extra=84;
-        else if (frame.msgid==322) extra=243;
-        else if (frame.msgid==324) extra=132;
+        const auto extra = openhd::generated::crc_extra(frame.msgid);
         if (extra) {
             uint16_t crc=0xffff;
             for (size_t j=1;j<header_len+payload_len;++j) crc=crc_accumulate(data[i+j],crc);
@@ -680,7 +676,7 @@ std::vector<std::string> UdpBridge::poll()
                     download.refreshed=std::chrono::steady_clock::now();
                     download.client.start("/openhd/settings.json");
                     lines.push_back("mav settings-clear "+std::to_string(frame.sysid)+" "+std::to_string(frame.compid));
-                    send_packet(321,88,{frame.sysid,frame.compid});
+                    send_packet(321,{frame.sysid,frame.compid});
                 }
             }
             if (frame.msgid == 0) {
@@ -692,7 +688,7 @@ std::vector<std::string> UdpBridge::poll()
                             download.refreshed=std::chrono::steady_clock::now();
                             download.client.start("/openhd/settings.json");
                             lines.push_back("mav settings-clear "+std::to_string(frame.sysid)+" "+std::to_string(comp));
-                            send_packet(321,88,{frame.sysid,comp});
+                            send_packet(321,{frame.sysid,comp});
                         }
                     }
                 }
@@ -728,7 +724,7 @@ std::vector<std::string> UdpBridge::poll()
         if (const auto request=download.client.poll()) {
             std::vector<uint8_t> payload{0,target.first,target.second};
             payload.insert(payload.end(),request->begin(),request->end());
-            send_packet(110,84,payload);
+            send_packet(110,payload);
         }
         if (!download.client.active && download.client.success) {
             const auto registry=nlohmann::json::parse(download.client.content,nullptr,false);
@@ -769,7 +765,7 @@ bool UdpBridge::handle_action_line(const std::string& line)
             const auto text=parsed.get<std::string>(); if (text.size()>128 || text.find('\0')!=std::string::npos) return false;
             put_fixed_string(payload,text,128); payload.push_back(11);
         } else return false;
-        return send_packet(323,78,payload);
+        return send_packet(323,payload);
     }
     if (action == "set") {
         std::string target;
@@ -808,7 +804,7 @@ bool UdpBridge::send_param_set(const std::string& target, const std::string& nam
     put_u8(payload, target_component_for(target, air_component_id_, ground_component_id_, flight_controller_component_id_));
     put_fixed_string(payload, name, 16);
     put_u8(payload, 9);
-    return send_packet(23, 168, payload);
+    return send_packet(23, payload);
 }
 
 bool UdpBridge::send_param_ext_set(const std::string& target, const std::string& name, const std::string& value)
@@ -830,7 +826,7 @@ bool UdpBridge::send_param_ext_set(const std::string& target, const std::string&
         put_fixed_string(payload, value, 128);
         put_u8(payload, 11); // MAV_PARAM_EXT_TYPE_CUSTOM
     }
-    return send_packet(323, 78, payload);
+    return send_packet(323, payload);
 }
 
 bool UdpBridge::send_command_long(const std::string& command, const std::string&)
@@ -891,11 +887,13 @@ bool UdpBridge::send_command_long(const std::string& command, const std::string&
     put_u8(payload, air_system_id_);
     put_u8(payload, target_component);
     put_u8(payload, 0);
-    return send_packet(76, 152, payload);
+    return send_packet(76, payload);
 }
 
-bool UdpBridge::send_packet(std::uint32_t message_id, std::uint8_t crc_extra, const std::vector<std::uint8_t>& payload)
+bool UdpBridge::send_packet(std::uint32_t message_id, const std::vector<std::uint8_t>& payload)
 {
+    const auto extra = openhd::generated::crc_extra(message_id);
+    if (!extra) return false;
 #if defined(_WIN32) || defined(__linux__)
     if (fd_ < 0 || payload.size() > 255U
         || (transport_ == NetworkTransport::udp && (peer_ == nullptr || !peer_->valid))) {
@@ -918,7 +916,7 @@ bool UdpBridge::send_packet(std::uint32_t message_id, std::uint8_t crc_extra, co
     for (std::size_t i = 1; i < packet.size(); ++i) {
         crc = crc_accumulate(packet[i], crc);
     }
-    crc = crc_accumulate(crc_extra, crc);
+    crc = crc_accumulate(*extra, crc);
     packet.push_back(static_cast<std::uint8_t>(crc & 0xffU));
     packet.push_back(static_cast<std::uint8_t>((crc >> 8U) & 0xffU));
     int sent {};
@@ -940,7 +938,6 @@ bool UdpBridge::send_packet(std::uint32_t message_id, std::uint8_t crc_extra, co
     return sent == static_cast<int>(packet.size());
 #else
     (void)message_id;
-    (void)crc_extra;
     (void)payload;
     return false;
 #endif

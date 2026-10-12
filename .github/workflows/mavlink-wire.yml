@@ -1,0 +1,17 @@
+name: MAVLink wire contract
+on:
+  push:
+    paths: ['src/common/mavlink_wire.hpp', '.github/workflows/mavlink-wire.yml']
+  pull_request:
+    paths: ['src/common/mavlink_wire.hpp', '.github/workflows/mavlink-wire.yml']
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: OpenHD/mavlink-headers
+          ref: 1df8e6a746dc4e448f990a48f310e522965d1516
+          path: canonical-wire
+      - run: cmp src/common/mavlink_wire.hpp canonical-wire/wire/mavlink_wire.hpp

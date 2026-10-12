@@ -5,6 +5,7 @@
  ******************************************************************************/
 
 #pragma once
+#include "mavlink_wire.hpp"
 
 #include <array>
 #include <cstddef>
@@ -200,28 +201,28 @@ static_assert(ids_are_unique(wifi_card::ids), "OpenHD Wi-Fi card IDs must be uni
 
 namespace wire {
 
-inline constexpr std::uint32_t stats_monitor_mode_wifi_link_message_id = 1211;
-inline constexpr std::uint32_t stats_monitor_mode_wifi_card_message_id = 1212;
-inline constexpr std::uint32_t core_status_message_id = 1227;
+inline constexpr std::uint32_t stats_monitor_mode_wifi_link_message_id = generated::openhd_stats_monitor_mode_wifi_link::id;
+inline constexpr std::uint32_t stats_monitor_mode_wifi_card_message_id = generated::openhd_stats_monitor_mode_wifi_card::id;
+inline constexpr std::uint32_t core_status_message_id = generated::openhd_core_status::id;
 
-inline constexpr std::size_t wifi_link_frequency_mhz_offset = 26;
-inline constexpr std::size_t wifi_link_rate_kbits_offset = 28;
-inline constexpr std::size_t wifi_link_packet_loss_offset = 32;
-inline constexpr std::size_t wifi_link_channel_width_offset = 33;
-inline constexpr std::size_t wifi_link_mcs_index_offset = 34;
-inline constexpr std::size_t wifi_link_snr_antenna1_offset = 38;
-inline constexpr std::size_t wifi_link_snr_antenna2_offset = 39;
-inline constexpr std::size_t wifi_link_temperature_offset = 40;
+inline constexpr std::size_t wifi_link_frequency_mhz_offset = generated::openhd_stats_monitor_mode_wifi_link::fields::curr_tx_channel_mhz;
+inline constexpr std::size_t wifi_link_rate_kbits_offset = generated::openhd_stats_monitor_mode_wifi_link::fields::curr_rate_kbits;
+inline constexpr std::size_t wifi_link_packet_loss_offset = generated::openhd_stats_monitor_mode_wifi_link::fields::curr_rx_packet_loss_perc;
+inline constexpr std::size_t wifi_link_channel_width_offset = generated::openhd_stats_monitor_mode_wifi_link::fields::curr_tx_channel_w_mhz;
+inline constexpr std::size_t wifi_link_mcs_index_offset = generated::openhd_stats_monitor_mode_wifi_link::fields::curr_tx_mcs_index;
+inline constexpr std::size_t wifi_link_snr_antenna1_offset = generated::openhd_stats_monitor_mode_wifi_link::fields::rx_snr_antenna1;
+inline constexpr std::size_t wifi_link_snr_antenna2_offset = generated::openhd_stats_monitor_mode_wifi_link::fields::rx_snr_antenna2;
+inline constexpr std::size_t wifi_link_temperature_offset = generated::openhd_stats_monitor_mode_wifi_link::fields::card_temperature;
 
-inline constexpr std::size_t wifi_card_rssi_offset = 23;
-inline constexpr std::size_t wifi_card_type_offset = 21;
-inline constexpr std::size_t wifi_card_quality_offset = 29;
-inline constexpr std::size_t wifi_card_snr_antenna1_offset = 34;
-inline constexpr std::size_t wifi_card_snr_antenna2_offset = 35;
-inline constexpr std::size_t wifi_card_temperature_offset = 36;
+inline constexpr std::size_t wifi_card_rssi_offset = generated::openhd_stats_monitor_mode_wifi_card::fields::rx_rssi;
+inline constexpr std::size_t wifi_card_type_offset = generated::openhd_stats_monitor_mode_wifi_card::fields::card_type;
+inline constexpr std::size_t wifi_card_quality_offset = generated::openhd_stats_monitor_mode_wifi_card::fields::rx_signal_quality_adapter;
+inline constexpr std::size_t wifi_card_snr_antenna1_offset = generated::openhd_stats_monitor_mode_wifi_card::fields::rx_snr_antenna1;
+inline constexpr std::size_t wifi_card_snr_antenna2_offset = generated::openhd_stats_monitor_mode_wifi_card::fields::rx_snr_antenna2;
+inline constexpr std::size_t wifi_card_temperature_offset = generated::openhd_stats_monitor_mode_wifi_card::fields::card_temperature;
 
-inline constexpr std::size_t core_status_cpu_temperature_offset = 14;
-inline constexpr std::size_t core_status_platform_type_offset = 18;
+inline constexpr std::size_t core_status_cpu_temperature_offset = generated::openhd_core_status::fields::cpu_temp;
+inline constexpr std::size_t core_status_platform_type_offset = generated::openhd_core_status::fields::platform_type;
 
 } // namespace wire
 
