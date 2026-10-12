@@ -267,29 +267,16 @@ jobs:
           file: openhd-glide_*_amd64.deb
 
   cedar-platform-packages:
-    name: package-${{ matrix.package_suffix }}
+    name: package-${{ matrix.platform }}
     if: ${{ !cancelled() && github.event_name != 'pull_request' && (needs['architecture-packages'].result == 'success' || inputs.cubie_only) }}
     needs: architecture-packages
     runs-on: ubuntu-22.04
+    env:
+      GLIDE_RELEASE: ${{ matrix.platform == 'radxa-cubie' && 'bullseye' || 'bookworm' }}
     strategy:
       fail-fast: false
       matrix:
-        exclude: ${{ fromJSON(inputs.cubie_only && '[{"package_suffix":"orangepi-zero3w"}]' || '[]') }}
-        include:
-          - image_type: orangepi-zero3w-lite
-            package_suffix: orangepi-zero3w
-            package_arch: arm64
-            cloudsmith_distro: debian
-            release: bookworm
-            radxa_repo_suite: bookworm
-            extra_debian_depends: "gstreamer1.0-tools, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad, gstreamer1.0-plugins-ugly, gstreamer1.0-libav"
-          - image_type: radxa-cubie
-            package_suffix: radxa-cubie
-            package_arch: arm64
-            cloudsmith_distro: debian
-            release: bullseye
-            radxa_repo_suite: bullseye
-            extra_debian_depends: "gstreamer1.0-tools, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad, gstreamer1.0-plugins-ugly, gstreamer1.0-libav"
+        platform: ${{ fromJSON(inputs.cubie_only && '["radxa-cubie"]' || '["orangepi-zero3w","radxa-cubie"]') }}
     steps:
       - uses: easimon/maximize-build-space@master
         with:
@@ -304,14 +291,13 @@ jobs:
           fetch-depth: 0
       - name: Build native Cedar package in chroot
         env:
-          GLIDE_IMAGE_TYPE: ${{ matrix.image_type }}
-          GLIDE_PACKAGE_SUFFIX: ${{ matrix.package_suffix }}
-          GLIDE_PACKAGE_ARCH: ${{ matrix.package_arch }}
-          GLIDE_CLOUDSMITH_DISTRO: ${{ matrix.cloudsmith_distro }}
-          GLIDE_RELEASE: ${{ matrix.release }}
-          GLIDE_RADXA_REPO_SUITE: ${{ matrix.radxa_repo_suite }}
+          GLIDE_IMAGE_TYPE: ${{ matrix.platform == 'radxa-cubie' && 'radxa-cubie' || 'orangepi-zero3w-lite' }}
+          GLIDE_PACKAGE_SUFFIX: ${{ matrix.platform }}
+          GLIDE_PACKAGE_ARCH: arm64
+          GLIDE_CLOUDSMITH_DISTRO: debian
+          GLIDE_RADXA_REPO_SUITE: ${{ env.GLIDE_RELEASE }}
           GLIDE_REQUIRE_RKMPP: "0"
-          GLIDE_EXTRA_DEBIAN_DEPENDS: ${{ matrix.extra_debian_depends }}
+          GLIDE_EXTRA_DEBIAN_DEPENDS: "gstreamer1.0-tools, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad, gstreamer1.0-plugins-ugly, gstreamer1.0-libav"
           CLOUDSMITH_API_KEY: ${{ secrets.CLOUDSMITH_API_KEY }}
           API_KEY: ${{ secrets.CLOUDSMITH_API_KEY }}
         run: bash scripts/ci-build-platform-package.sh
@@ -319,7 +305,7 @@ jobs:
         run: find /opt/OpenHD-ChrootCompiler/out "$GITHUB_WORKSPACE"/chroot-out-* -maxdepth 1 -name '*.deb' -exec cp {} . \;
       - uses: actions/upload-artifact@v4
         with:
-          name: OpenHD-Glide-${{ matrix.package_suffix }}-${{ matrix.release }}
+          name: OpenHD-Glide-${{ matrix.platform }}-${{ env.GLIDE_RELEASE }}
           path: '*.deb'
           if-no-files-found: error
       - name: Publish Cedar package
@@ -331,8 +317,8 @@ jobs:
           format: deb
           owner: openhd
           repo: ${{ github.ref_name == 'main' && 'dev-release' || github.ref_name }}
-          distro: ${{ matrix.cloudsmith_distro }}
-          release: ${{ matrix.release }}
+          distro: debian
+          release: ${{ env.GLIDE_RELEASE }}
           republish: "true"
           file: '*.deb'
 
