@@ -138,7 +138,7 @@ elif [ "${target_release}" = "bullseye" ]; then
   # mirror still advertises versions whose package URLs now return 404.
   for source_file in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
     if [ -f "${source_file}" ] && grep -q 'bullseye-security' "${source_file}"; then
-      sed -i -E 's|https?://(deb\.debian\.org|security\.debian\.org)/debian-security|https://archive.debian.org/debian-security|g' "${source_file}"
+      sed -i -E 's#https?://(deb\.debian\.org|security\.debian\.org)/debian-security#https://archive.debian.org/debian-security#g' "${source_file}"
     fi
   done
   if [ "${radxa_repo_suite}" = "direct-bullseye" ]; then

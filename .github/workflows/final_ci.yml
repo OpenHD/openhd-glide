@@ -25,6 +25,11 @@ name: final_ci
 
 on:
   workflow_dispatch:
+    inputs:
+      cubie_only:
+        description: Rebuild only the Radxa Cubie vendor package
+        type: boolean
+        default: false
   push:
     branches: [main, dev-release, release, openhd-3.0]
   pull_request:
@@ -39,6 +44,7 @@ permissions:
 
 jobs:
   architecture-packages:
+    if: ${{ !inputs.cubie_only }}
     name: package-${{ matrix.architecture }}
     runs-on: ubuntu-22.04
     strategy:
@@ -262,12 +268,13 @@ jobs:
 
   cedar-platform-packages:
     name: package-${{ matrix.package_suffix }}
-    if: github.event_name != 'pull_request'
+    if: ${{ !cancelled() && github.event_name != 'pull_request' && (needs['architecture-packages'].result == 'success' || inputs.cubie_only) }}
     needs: architecture-packages
     runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
       matrix:
+        exclude: ${{ fromJSON(inputs.cubie_only && '[{"package_suffix":"orangepi-zero3w"}]' || '[]') }}
         include:
           - image_type: orangepi-zero3w-lite
             package_suffix: orangepi-zero3w
@@ -331,7 +338,7 @@ jobs:
 
   orqa:
     name: build-orqa
-    if: github.event_name != 'pull_request'
+    if: github.event_name != 'pull_request' && !inputs.cubie_only
     needs: architecture-packages
     runs-on: ubuntu-22.04
     env:
