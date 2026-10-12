@@ -211,7 +211,26 @@ extract_dev_deb_without_runtime_changes() {
     if [ "${target_release}" = "bookworm" ]; then
       apt-get -t bookworm download "${package_name}"
     else
-      apt-get download "${package_name}"
+      download_log="$(mktemp)"
+      if apt-get download "${package_name}" >"${download_log}" 2>&1; then
+        cat "${download_log}"
+      else
+        cat "${download_log}" >&2
+        if ! grep -q '404  Not Found' "${download_log}"; then
+          rm -f "${download_log}"
+          return 1
+        fi
+        # Some vendor images advertise a removed security package. Retrieve
+        # authenticated headers from the target base suite; extraction below
+        # never installs or downgrades the vendor's graphics runtime.
+        echo "Retrying ${package_name} headers from ${target_release} after repository 404" >&2
+        rm -f "${package_name}"_*.deb
+        apt-get download "${package_name}/${target_release}" || {
+          rm -f "${download_log}"
+          return 1
+        }
+      fi
+      rm -f "${download_log}"
     fi
     dpkg-deb -x "${package_name}"_*.deb /
   )
