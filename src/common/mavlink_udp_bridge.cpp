@@ -151,8 +151,10 @@ template <typename T>
 T read_le(const std::vector<std::uint8_t>& payload, std::size_t offset)
 {
     T value {};
-    if (offset + sizeof(T) <= payload.size()) {
-        std::memcpy(&value, payload.data() + offset, sizeof(T));
+    if (offset < payload.size()) {
+        // MAVLink 2 strips trailing zero bytes, including part of a scalar.
+        std::memcpy(&value, payload.data() + offset,
+                    std::min(sizeof(T), payload.size() - offset));
     }
     return value;
 }
